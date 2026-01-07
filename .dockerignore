@@ -1,0 +1,25 @@
+# deps + build artifacts
+node_modules
+dist
+build
+
+# git + github
+.git
+.github
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+logs
+
+# editor / OS
+.vscode
+.idea
+.DS_Store
+
+# tests/coverage
+coverage

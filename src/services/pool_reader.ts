@@ -1,11 +1,9 @@
-import { AnchorProvider } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
 
 import { PROGRAM_ID, connection, pk } from "../solana.js";
-import { getProvider } from "../anchor/provider.js";
-import { getProgram, requireProgramId } from "../anchor/program.js";
 import { safeNumber } from "../utils/http.js";
 import { deriveBinPda } from "../utils/pda.js";
+import { decodeAccount } from "../idl/coder.js";
 
 export type PoolView = {
   id: string;
@@ -30,7 +28,7 @@ export type PoolView = {
   activeBin: number;
   initialBin: number;
 
-  // Active-bin reserves in ATOMS (stringified bigint)
+  // Active-bin reserves in ATOMS
   binReserveBaseAtoms: string | null;
   binReserveQuoteAtoms: string | null;
 
@@ -65,7 +63,12 @@ async function getMintDecimals(mint: PublicKey): Promise<number> {
 
   const parsed = (data as any).parsed;
   const decimals = parsed?.info?.decimals;
-  if (typeof decimals !== "number" || !Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
+  if (
+    typeof decimals !== "number" ||
+    !Number.isInteger(decimals) ||
+    decimals < 0 ||
+    decimals > 255
+  ) {
     throw new Error(`mint_decimals_invalid: ${k}`);
   }
 
@@ -74,15 +77,19 @@ async function getMintDecimals(mint: PublicKey): Promise<number> {
 }
 
 export async function readPool(pool: string): Promise<PoolView> {
-  const provider = getProvider() as AnchorProvider;
-  const program = getProgram(provider);
-  requireProgramId(program, PROGRAM_ID);
+  // Read-only: fetch raw account data and decode via IDL coder
+  const poolPk = pk(pool);
 
-  const p = await program.account.pool.fetch(pk(pool));
+  const info = await connection.getAccountInfo(poolPk, "confirmed");
+  if (!info?.data) throw new Error(`pool_not_found: ${pool}`);
+
+  // Decode "Pool" account (Anchor discriminator included in account data)
+  const p: any = decodeAccount("Pool", Buffer.from(info.data));
 
   // price
   const priceQ64 = BigInt(p.priceQ6464.toString());
-  const priceNumber = safeNumber(priceQ64) === null ? null : Number(priceQ64) / 2 ** 64;
+  const priceNumber =
+    safeNumber(priceQ64) === null ? null : Number(priceQ64) / 2 ** 64;
 
   // decimals
   const baseMintPk = p.baseMint as PublicKey;
@@ -101,21 +108,30 @@ export async function readPool(pool: string): Promise<PoolView> {
 
   if (Number.isInteger(activeBin) && activeBin >= 0) {
     const binIndexU64 = BigInt(activeBin);
-    const poolPk = pk(pool);
     const binPda = deriveBinPda(PROGRAM_ID, poolPk, binIndexU64);
 
     try {
-      const bin = await program.account.liquidityBin.fetch(binPda);
+      const binInfo = await connection.getAccountInfo(binPda, "confirmed");
 
-      // Orbit Finance IDL reserveBase/reserveQuote as u128.
-      // Anchor returns BN-like, we stringify to BigInt safely via .toString().
-      const reserveBaseAtoms = BigInt((bin as any).reserveBase.toString());
-      const reserveQuoteAtoms = BigInt((bin as any).reserveQuote.toString());
+      if (binInfo?.data) {
+        const bin: any = decodeAccount(
+          "LiquidityBin",
+          Buffer.from(binInfo.data)
+        );
 
-      binReserveBaseAtoms = reserveBaseAtoms.toString();
-      binReserveQuoteAtoms = reserveQuoteAtoms.toString();
+        // u128 fields come back BN-like => .toString() => BigInt safe parse
+        const reserveBaseAtoms = BigInt(bin.reserveBase.toString());
+        const reserveQuoteAtoms = BigInt(bin.reserveQuote.toString());
+
+        binReserveBaseAtoms = reserveBaseAtoms.toString();
+        binReserveQuoteAtoms = reserveQuoteAtoms.toString();
+      } else {
+        // bin doesn't exist yet
+        binReserveBaseAtoms = null;
+        binReserveQuoteAtoms = null;
+      }
     } catch {
-      // If bin doesn't exist yet, keep null (do NOT lie with 0)
+      // If RPC fails or bin doesn't exist, keep null (do NOT lie with 0)
       binReserveBaseAtoms = null;
       binReserveQuoteAtoms = null;
     }
@@ -123,7 +139,7 @@ export async function readPool(pool: string): Promise<PoolView> {
 
   return {
     id: pool,
-    programId: program.programId.toBase58(),
+    programId: PROGRAM_ID.toBase58(),
 
     baseMint: baseMintPk.toBase58(),
     quoteMint: quoteMintPk.toBase58(),

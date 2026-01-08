@@ -28,7 +28,7 @@ export type PoolView = {
   activeBin: number;
   initialBin: number;
 
-  // Active-bin reserves in ATOMS
+  // Active-bin reserves in ATOMS (stringified bigint)
   binReserveBaseAtoms: string | null;
   binReserveQuoteAtoms: string | null;
 
@@ -40,6 +40,44 @@ export type PoolView = {
 
 const DECIMALS_CACHE = new Map<string, number>();
 
+function pick<T = any>(obj: any, keys: string[]): T | undefined {
+  for (const k of keys) {
+    if (obj && obj[k] != null) return obj[k] as T;
+  }
+  return undefined;
+}
+
+function asPk(x: any, label: string): PublicKey {
+  if (x instanceof PublicKey) return x;
+  if (typeof x === "string") return new PublicKey(x);
+  if (x instanceof Uint8Array || Buffer.isBuffer(x)) return new PublicKey(x);
+  throw new Error(`${label}_invalid_pubkey`);
+}
+
+function asU64String(x: any, label: string): string {
+  if (x == null) throw new Error(`${label}_missing`);
+  if (typeof x === "bigint") return x.toString();
+  if (typeof x === "number") return BigInt(Math.trunc(x)).toString();
+  if (typeof x === "string") return x;
+  if (typeof x?.toString === "function") return x.toString();
+  throw new Error(`${label}_invalid_u64`);
+}
+
+function asNumberI32(x: any, label: string): number {
+  if (x == null) throw new Error(`${label}_missing`);
+  if (typeof x === "number" && Number.isFinite(x)) return Math.trunc(x);
+  if (typeof x === "bigint") return Number(x);
+  if (typeof x === "string") {
+    const n = Number(x);
+    if (Number.isFinite(n)) return Math.trunc(n);
+  }
+  if (typeof x?.toString === "function") {
+    const n = Number(x.toString());
+    if (Number.isFinite(n)) return Math.trunc(n);
+  }
+  throw new Error(`${label}_invalid_i32`);
+}
+
 async function getMintDecimals(mint: PublicKey): Promise<number> {
   const k = mint.toBase58();
   const cached = DECIMALS_CACHE.get(k);
@@ -49,7 +87,6 @@ async function getMintDecimals(mint: PublicKey): Promise<number> {
   const value = info.value;
   if (!value) throw new Error(`mint_not_found: ${k}`);
 
-  // Parsed format: { data: { parsed: { info: { decimals }}}}
   const data: unknown = value.data;
   if (
     typeof data !== "object" ||
@@ -77,61 +114,64 @@ async function getMintDecimals(mint: PublicKey): Promise<number> {
 }
 
 export async function readPool(pool: string): Promise<PoolView> {
-  // Read-only: fetch raw account data and decode via IDL coder
   const poolPk = pk(pool);
 
   const info = await connection.getAccountInfo(poolPk, "confirmed");
   if (!info?.data) throw new Error(`pool_not_found: ${pool}`);
 
-  // Decode "Pool" account (Anchor discriminator included in account data)
-  const p: any = decodeAccount("Pool", Buffer.from(info.data));
+  // Decode via IDL coder
+  const raw: any = decodeAccount("Pool", Buffer.from(info.data));
+  const adminPk = asPk(pick(raw, ["admin"])!, "admin");
+  const baseMintPk = asPk(pick(raw, ["baseMint", "base_mint"])!, "base_mint");
+  const quoteMintPk = asPk(pick(raw, ["quoteMint", "quote_mint"])!, "quote_mint");
+  const baseVaultPk = asPk(pick(raw, ["baseVault", "base_vault"])!, "base_vault");
+  const quoteVaultPk = asPk(pick(raw, ["quoteVault", "quote_vault"])!, "quote_vault");
+  const creatorFeeVaultPk = pick<any>(raw, ["creatorFeeVault", "creator_fee_vault"]);
+  const holdersFeeVaultPk = pick<any>(raw, ["holdersFeeVault", "holders_fee_vault"]);
+  const nftFeeVaultPk = pick<any>(raw, ["nftFeeVault", "nft_fee_vault"]);
 
-  // price
-  const priceQ64 = BigInt(p.priceQ6464.toString());
+  const priceVal = pick<any>(raw, ["priceQ6464", "priceQ64_64", "price_q64_64"]);
+  const priceQ64 = BigInt(asU64String(priceVal, "price_q64_64"));
   const priceNumber =
     safeNumber(priceQ64) === null ? null : Number(priceQ64) / 2 ** 64;
 
-  // decimals
-  const baseMintPk = p.baseMint as PublicKey;
-  const quoteMintPk = p.quoteMint as PublicKey;
+  const activeBin = asNumberI32(pick(raw, ["activeBin", "active_bin"])!, "active_bin");
+  const initialBin = asNumberI32(pick(raw, ["initialBinId", "initial_bin_id"])!, "initial_bin_id");
+  const pauseBits = asNumberI32(pick(raw, ["pauseBits", "pause_bits"]) ?? 0, "pause_bits");
+  const binStepBps = asNumberI32(pick(raw, ["binStepBps", "bin_step_bps"]) ?? 0, "bin_step_bps");
+  const baseFeeBps = asNumberI32(pick(raw, ["baseFeeBps", "base_fee_bps"]) ?? 0, "base_fee_bps");
 
+  // decimals
   const [baseDecimals, quoteDecimals] = await Promise.all([
     getMintDecimals(baseMintPk),
     getMintDecimals(quoteMintPk),
   ]);
 
   // active bin reserves (best-effort)
-  // liquidityBin PDA seed expects u64, pool.activeBin is i32 in Orbit Finance IDL.
-  const activeBin = Number(p.activeBin);
   let binReserveBaseAtoms: string | null = null;
   let binReserveQuoteAtoms: string | null = null;
 
+  // PDA expects u64, your state uses i32.
   if (Number.isInteger(activeBin) && activeBin >= 0) {
     const binIndexU64 = BigInt(activeBin);
     const binPda = deriveBinPda(PROGRAM_ID, poolPk, binIndexU64);
 
     try {
       const binInfo = await connection.getAccountInfo(binPda, "confirmed");
-
       if (binInfo?.data) {
-        const bin: any = decodeAccount(
-          "LiquidityBin",
-          Buffer.from(binInfo.data)
-        );
+        const binRaw: any = decodeAccount("LiquidityBin", Buffer.from(binInfo.data));
 
-        // u128 fields come back BN-like => .toString() => BigInt safe parse
-        const reserveBaseAtoms = BigInt(bin.reserveBase.toString());
-        const reserveQuoteAtoms = BigInt(bin.reserveQuote.toString());
+        const reserveBaseVal = pick<any>(binRaw, ["reserveBase", "reserve_base"]);
+        const reserveQuoteVal = pick<any>(binRaw, ["reserveQuote", "reserve_quote"]);
 
-        binReserveBaseAtoms = reserveBaseAtoms.toString();
-        binReserveQuoteAtoms = reserveQuoteAtoms.toString();
-      } else {
-        // bin doesn't exist yet
-        binReserveBaseAtoms = null;
-        binReserveQuoteAtoms = null;
+        if (reserveBaseVal != null && reserveQuoteVal != null) {
+          const reserveBaseAtoms = BigInt(asU64String(reserveBaseVal, "reserve_base"));
+          const reserveQuoteAtoms = BigInt(asU64String(reserveQuoteVal, "reserve_quote"));
+          binReserveBaseAtoms = reserveBaseAtoms.toString();
+          binReserveQuoteAtoms = reserveQuoteAtoms.toString();
+        }
       }
     } catch {
-      // If RPC fails or bin doesn't exist, keep null (do NOT lie with 0)
       binReserveBaseAtoms = null;
       binReserveQuoteAtoms = null;
     }
@@ -147,25 +187,28 @@ export async function readPool(pool: string): Promise<PoolView> {
     baseDecimals,
     quoteDecimals,
 
-    priceQ6464: p.priceQ6464.toString(),
+    priceQ6464: priceQ64.toString(),
     priceNumber,
 
-    baseVault: p.baseVault.toBase58(),
-    quoteVault: p.quoteVault.toBase58(),
+    baseVault: baseVaultPk.toBase58(),
+    quoteVault: quoteVaultPk.toBase58(),
 
-    creatorFeeVault: p.creatorFeeVault?.toBase58?.() ?? null,
-    holdersFeeVault: p.holdersFeeVault?.toBase58?.() ?? null,
-    nftFeeVault: p.nftFeeVault?.toBase58?.() ?? null,
+    creatorFeeVault:
+      creatorFeeVaultPk != null ? asPk(creatorFeeVaultPk, "creator_fee_vault").toBase58() : null,
+    holdersFeeVault:
+      holdersFeeVaultPk != null ? asPk(holdersFeeVaultPk, "holders_fee_vault").toBase58() : null,
+    nftFeeVault:
+      nftFeeVaultPk != null ? asPk(nftFeeVaultPk, "nft_fee_vault").toBase58() : null,
 
     activeBin,
-    initialBin: Number(p.initialBinId),
+    initialBin,
 
     binReserveBaseAtoms,
     binReserveQuoteAtoms,
 
-    admin: p.admin.toBase58(),
-    pausedBits: Number(p.pauseBits),
-    binStepBps: Number(p.binStepBps),
-    baseFeeBps: Number(p.baseFeeBps),
+    admin: adminPk.toBase58(),
+    pausedBits: pauseBits,
+    binStepBps,
+    baseFeeBps,
   };
 }

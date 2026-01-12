@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { env, poolsFromEnv } from "../config.js";
-import { readPool } from "../services/pool_reader.js";
+import { readBins, readPool } from "../services/pool_reader.js";
 import { getTrades, listIndexedPools } from "../services/trades_indexer.js";
 import { readAsset } from "../services/assets.js";
 import { readPair } from "../services/pairs.js";
@@ -55,6 +55,21 @@ export async function v1Routes(app: FastifyInstance) {
     if (notAllowed) return notAllowed;
 
     return await readPool(params.pool);
+  });
+
+  app.get("/bins/:pool", async (req) => {
+    const params = z.object({ pool: z.string().min(32) }).parse(req.params);
+    const q = z
+      .object({
+        radius: z.coerce.number().int().min(10).max(2000).default(300),
+        limit: z.coerce.number().int().min(20).max(4000).default(700),
+      })
+      .parse(req.query ?? {});
+
+    const notAllowed = assertPoolAllowed(params.pool);
+    if (notAllowed) return notAllowed;
+
+    return await readBins(params.pool, { radius: q.radius, limit: q.limit });
   });
 
   app.get("/trades/:pool", async (req) => {

@@ -40,11 +40,11 @@ export type PoolView = {
 
 export type BinPoint = {
   binId: number;
-  price: number | null;   // quote per base (same style you already use)
-  baseAtoms: string;      // raw reserves as stringified bigint
-  quoteAtoms: string;     // raw reserves as stringified bigint
-  baseUi: number;         // ui reserves
-  quoteUi: number;        // ui reserves
+  price: number | null;
+  baseAtoms: string;
+  quoteAtoms: string;
+  baseUi: number;
+  quoteUi: number;
 };
 
 export type BinsView = {
@@ -133,12 +133,10 @@ async function getMintDecimals(mint: PublicKey): Promise<number> {
 
 /**
  * state stores binId as i32 (can be negative).
- * deriveBinPda expects a u64 seed. Convert i32 -> u32 two's complement, then to u64.
- * -1203 becomes (2^32 - 1203) as the seed.
+ * deriveBinPda expects a u64 seed. Convert i32 -> u64 via two's complement.
  */
 function binIdI32ToSeedU64(binId: number): bigint {
   if (!Number.isInteger(binId)) throw new Error("bin_id_not_int");
-
   if (binId < -2147483648 || binId > 2147483647) {
     throw new Error("bin_id_out_of_i32_range");
   }
@@ -167,13 +165,26 @@ function toUi(atomsStr: string, decimals: number): number {
   }
 }
 
+/**
+ * Convert atoms-price (quoteAtoms/baseAtoms) -> UI price (quoteUi/baseUi).
+ * priceUi = priceAtoms * 10^(baseDecimals - quoteDecimals)
+ */
+function priceAtomsToUi(priceAtoms: number | null, baseDecimals: number, quoteDecimals: number): number | null {
+  if (priceAtoms == null || !Number.isFinite(priceAtoms)) return null;
+
+  const exp = baseDecimals - quoteDecimals;
+  if (!Number.isFinite(exp) || exp < -30 || exp > 30) return null;
+
+  const scaled = priceAtoms * Math.pow(10, exp);
+  return Number.isFinite(scaled) ? scaled : null;
+}
+
 export async function readPool(pool: string): Promise<PoolView> {
   const poolPk = pk(pool);
 
   const info = await connection.getAccountInfo(poolPk, "confirmed");
   if (!info?.data) throw new Error(`pool_not_found: ${pool}`);
 
-  // Decode via IDL coder
   const raw: any = decodeAccount("Pool", Buffer.from(info.data));
   const adminPk = asPk(pick(raw, ["admin"])!, "admin");
   const baseMintPk = asPk(pick(raw, ["baseMint", "base_mint"])!, "base_mint");
@@ -184,9 +195,10 @@ export async function readPool(pool: string): Promise<PoolView> {
   const holdersFeeVaultPk = pick<any>(raw, ["holdersFeeVault", "holders_fee_vault"]);
   const nftFeeVaultPk = pick<any>(raw, ["nftFeeVault", "nft_fee_vault"]);
 
+  // q64.64 price (atoms-price: quoteAtoms/baseAtoms)
   const priceVal = pick<any>(raw, ["priceQ6464", "priceQ64_64", "price_q64_64"]);
   const priceQ64 = BigInt(asU64String(priceVal, "price_q64_64"));
-  const priceNumber = safeNumber(priceQ64) === null ? null : Number(priceQ64) / 2 ** 64;
+  const priceAtoms = safeNumber(priceQ64) === null ? null : Number(priceQ64) / 2 ** 64;
 
   const activeBin = asNumberI32(pick(raw, ["activeBin", "active_bin"])!, "active_bin");
   const initialBin = asNumberI32(pick(raw, ["initialBinId", "initial_bin_id"])!, "initial_bin_id");
@@ -200,11 +212,13 @@ export async function readPool(pool: string): Promise<PoolView> {
     getMintDecimals(quoteMintPk),
   ]);
 
+  // UI price
+  const priceNumber = priceAtomsToUi(priceAtoms, baseDecimals, quoteDecimals);
+
   // active bin reserves (best-effort)
   let binReserveBaseAtoms: string | null = null;
   let binReserveQuoteAtoms: string | null = null;
 
-  // allow negative activeBin too (wrap seed)
   if (Number.isInteger(activeBin)) {
     const binIndexU64 = binIdI32ToSeedU64(activeBin);
     const binPda = deriveBinPda(PROGRAM_ID, poolPk, binIndexU64);
@@ -267,10 +281,8 @@ export async function readPool(pool: string): Promise<PoolView> {
 }
 
 /**
- * Read a histogram window of LiquidityBin accounts around activeBin in ONE batched RPC pass.
- * This returns:
- * - bins[] suitable for drawing (base/quote per bin)
- * - price per bin computed from pool.priceNumber and binStepBps
+ * Read a histogram window of LiquidityBin accounts around activeBin.
+ * price per bin computed from pool.priceNumber and binStepBps.
  */
 export async function readBins(pool: string, opts?: { radius?: number; limit?: number }): Promise<BinsView> {
   const radius = Math.max(10, Math.min(2000, Math.trunc(opts?.radius ?? 300)));
@@ -292,7 +304,7 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     return deriveBinPda(PROGRAM_ID, poolPk, seed);
   });
 
-  // batch fetch (100 is safe for getMultipleAccountsInfo)
+  // batch fetch
   const batches = chunk(pdas, 100);
   const infos: (Awaited<ReturnType<typeof connection.getMultipleAccountsInfo>>[number])[] = [];
   for (const b of batches) {
@@ -300,7 +312,7 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     infos.push(...res);
   }
 
-  // pre-fill all bins (so empty bins render as 0)
+  // pre-fill all bins
   const points: BinPoint[] = binIds.map((binId) => {
     const priceActive = poolView.priceNumber;
     const price =
@@ -342,13 +354,13 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     }
   }
 
-  // filter/sort
   const bins = points
-    .filter((b: BinPoint) =>
-      Number.isFinite(b.binId) &&
-      (b.price == null || Number.isFinite(b.price)) &&
-      Number.isFinite(b.baseUi) &&
-      Number.isFinite(b.quoteUi)
+    .filter(
+      (b: BinPoint) =>
+        Number.isFinite(b.binId) &&
+        (b.price == null || Number.isFinite(b.price)) &&
+        Number.isFinite(b.baseUi) &&
+        Number.isFinite(b.quoteUi)
     )
     .sort((a: BinPoint, b: BinPoint) => a.binId - b.binId)
     .slice(0, limit);
@@ -363,7 +375,7 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     activeBin: poolView.activeBin,
     initialBin: poolView.initialBin,
     binStepBps: poolView.binStepBps,
-    priceActive: poolView.priceNumber,
+    priceActive: poolView.priceNumber, 
     bins,
   };
 }

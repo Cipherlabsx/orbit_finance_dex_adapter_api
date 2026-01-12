@@ -138,9 +138,11 @@ async function getMintDecimals(mint: PublicKey): Promise<number> {
  */
 function binIdI32ToSeedU64(binId: number): bigint {
   if (!Number.isInteger(binId)) throw new Error("bin_id_not_int");
-  const b = BigInt(binId);
-  if (b >= 0n) return b;
-  return (1n << 32n) + b; // wrap i32 -> u32 (two's complement)
+
+  if (binId < -2147483648 || binId > 2147483647) {
+    throw new Error("bin_id_out_of_i32_range");
+  }
+  return BigInt.asUintN(64, BigInt(binId));
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {

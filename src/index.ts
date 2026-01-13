@@ -8,7 +8,7 @@ import pretty from "pino-pretty";
 import { env, corsOrigins, poolsFromEnv } from "./config.js";
 import { PROGRAM_ID } from "./solana.js";
 import { v1Routes } from "./routes/v1.js";
-import { createTradeStore, startTradeIndexer } from "./services/trades_indexer.js";
+import { backfillTrades, createTradeStore, startTradeIndexer } from "./services/trades_indexer.js";
 import { discoverPools } from "./services/fetch_pools.js";
 import { reqId } from "./utils/http.js";
 
@@ -147,10 +147,15 @@ if (app.poolsList.length === 0) {
 seedPoolsIntoTradeStore(app.poolsList);
 
 /**
- * Start the trades indexer
- * IMPORTANT: startTradeIndexer receives app.poolsList (the same array object).
- * Because we mutate poolsList in-place during refresh, the indexer will see updates
- * as long as it reads the array each tick (your current implementation does).
+ * One-time historic backfill on startup
+ * Controlled by:
+ *   BACKFILL_MAX_SIGNATURES_PER_POOL
+ *   BACKFILL_PAGE_SIZE
+ */
+await backfillTrades(app.tradeStore, app.poolsList);
+
+/**
+ * Start live polling indexer (recent trades)
  */
 const indexer = startTradeIndexer(app.tradeStore, app.poolsList);
 

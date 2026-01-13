@@ -29,6 +29,12 @@ export const env = z
     TRADES_POLL_MS: z.coerce.number().int().min(500).max(60_000).default(4000),
 
     DEX_KEY: z.string().min(2).default("orbit_finance"),
+
+    // Historic backfill
+    // 0 disables backfill
+    BACKFILL_MAX_SIGNATURES_PER_POOL: z.coerce.number().int().min(0).max(250_000).default(0),
+    // page size for `getSignaturesForAddress` pagination
+    BACKFILL_PAGE_SIZE: z.coerce.number().int().min(10).max(1000).default(500),
   })
   .parse(process.env);
 

@@ -12,6 +12,7 @@ import {
 import { connection, pk, PROGRAM_ID } from "../solana.js";
 import { env } from "../config.js";
 import { readPool } from "./pool_reader.js";
+import { MintLayout } from "@solana/spl-token";
 
 export type Trade = {
   signature: string;
@@ -295,6 +296,40 @@ async function getPoolMini(pool: string): Promise<PoolMini> {
   return v;
 }
 
+// mint decimals cache
+const MINT_DEC_CACHE = new Map<string, { ts: number; dec: number }>();
+const MINT_DEC_TTL_MS = 60_000;
+
+async function getMintDecimalsCached(mint: string): Promise<number> {
+  const now = Date.now();
+  const hit = MINT_DEC_CACHE.get(mint);
+  if (hit && now - hit.ts < MINT_DEC_TTL_MS) return hit.dec;
+
+  const info = await connection.getAccountInfo(pk(mint), "confirmed");
+  if (!info?.data) return 0;
+
+  const dec = Number(MintLayout.decode(info.data).decimals ?? 0);
+  MINT_DEC_CACHE.set(mint, { ts: now, dec });
+  return dec;
+}
+
+// lazy import so this file doesn't hard-require supabase during tests
+async function writeVolumeToSupabase(params: {
+  trade: Trade;
+  quoteMint: string;
+  quoteDecimals: number;
+  quoteValue: number; // quote units (e.g. USDC)
+}) {
+  try {
+    const mod = await import("../supabase.js");
+    if (typeof mod.writeTradeAndVolume === "function") {
+      await mod.writeTradeAndVolume(params);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 async function processSignatureForPool(store: TradeStore, pool: string, sig: string) {
   const seenKey = `${sig}:${pool}`;
   if (store.seen.has(seenKey)) return;
@@ -370,7 +405,7 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
     return;
   }
 
-  pushTrade(store, {
+  const trade: Trade = {
     signature: sig,
     slot: tx.slot,
     blockTime: tx.blockTime ?? null,
@@ -380,6 +415,30 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
     outMint,
     amountIn,
     amountOut,
+  };
+
+  pushTrade(store, trade);
+
+  // compute quote-based volume (no price required)
+  const quoteMint = poolMini.quoteMint;
+  const quoteDecimals = await getMintDecimalsCached(quoteMint);
+
+  let quoteRaw = 0n;
+  try {
+    if (trade.inMint === quoteMint && trade.amountIn) quoteRaw = BigInt(trade.amountIn);
+    else if (trade.outMint === quoteMint && trade.amountOut) quoteRaw = BigInt(trade.amountOut);
+  } catch {
+    // ignore
+  }
+
+  const quoteValue = Number(quoteRaw) / 10 ** quoteDecimals;
+
+  // store to supabase (best effort, never breaks indexer loop)
+  await writeVolumeToSupabase({
+    trade,
+    quoteMint,
+    quoteDecimals,
+    quoteValue: Number.isFinite(quoteValue) ? quoteValue : 0,
   });
 }
 

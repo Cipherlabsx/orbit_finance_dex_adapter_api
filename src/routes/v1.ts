@@ -61,8 +61,8 @@ export async function v1Routes(app: FastifyInstance) {
     const params = z.object({ pool: z.string().min(32) }).parse(req.params);
     const q = z
       .object({
-        radius: z.coerce.number().int().min(10).max(2000).default(30),
-        limit: z.coerce.number().int().min(20).max(4000).default(50),
+        radius: z.coerce.number().int().min(10).max(2000).default(60),
+        limit: z.coerce.number().int().min(20).max(4000).default(180),
       })
       .parse(req.query ?? {});
 

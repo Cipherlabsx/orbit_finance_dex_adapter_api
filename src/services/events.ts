@@ -120,17 +120,29 @@ function toSwapEvent(args: {
  * /events?fromBlock&toBlock (inclusive)
  * Uses in-memory TradeStore + enriches using pool_reader().
  */
+const blockTimeCache = new Map<number, number>();
+
+async function getBlockTimeSafe(slot: number): Promise<number | null> {
+  const cached = blockTimeCache.get(slot);
+  if (cached != null) return cached;
+
+  const bt = await connection.getBlockTime(slot);
+  if (bt != null) blockTimeCache.set(slot, bt);
+
+  return bt ?? null;
+}
+
 export async function readEventsBySlotRange(
   store: TradeStore,
   fromSlot: number,
-  toSlot: number,
+  toSlot: number
 ): Promise<StandardsEventsResponse> {
   const all: Trade[] = [];
   for (const trades of store.byPool.values()) all.push(...trades);
 
   const filtered = all
     .filter((t) => t.slot >= fromSlot && t.slot <= toSlot)
-    .sort((a, b) => (a.slot - b.slot) || a.signature.localeCompare(b.signature));
+    .sort((a, b) => a.slot - b.slot || a.signature.localeCompare(b.signature));
 
   // group by signature so eventIndex is stable per tx
   const bySig = new Map<string, Trade[]>();
@@ -146,7 +158,8 @@ export async function readEventsBySlotRange(
     let eventIndex = 0;
 
     for (const trade of trades) {
-      if (trade.blockTime == null) continue;
+      const blockTime = trade.blockTime ?? (await getBlockTimeSafe(trade.slot));
+      if (blockTime == null) continue;
 
       const poolId = trade.pool;
 
@@ -189,8 +202,8 @@ export async function readEventsBySlotRange(
           trade,
           poolId,
           slot: trade.slot,
-          blockTime: trade.blockTime,
-          txnIndex: 0, 
+          blockTime,
+          txnIndex: 0,
           eventIndex: eventIndex++,
           maker: trade.user ?? "11111111111111111111111111111111",
           priceNative,
@@ -200,7 +213,7 @@ export async function readEventsBySlotRange(
           asset1In,
           asset0Out,
           asset1Out,
-        }),
+        })
       );
     }
   }
@@ -208,11 +221,6 @@ export async function readEventsBySlotRange(
   return { events };
 }
 
-/**
- * /latest-block
- * Must not advertise blocks beyond what /events can serve.
- * We serve from in-memory store safe to return current confirmed slot.
- */
 export async function readLatestBlock(): Promise<{ block: StandardsBlock }> {
   const slot = await connection.getSlot("confirmed");
   const blockTime = await connection.getBlockTime(slot);

@@ -1,4 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
+import { AccountLayout } from "@solana/spl-token";
 
 import { PROGRAM_ID, connection, pk } from "../solana.js";
 import { safeNumber } from "../utils/http.js";
@@ -68,6 +69,16 @@ function pick<T = any>(obj: any, keys: string[]): T | undefined {
     if (obj && obj[k] != null) return obj[k] as T;
   }
   return undefined;
+}
+
+/**
+ * Read SPL token account raw amount (u64) from a token account (vault ATA).
+ */
+async function readTokenAccountAmountRaw(tokenAccount: PublicKey): Promise<bigint> {
+  const info = await connection.getAccountInfo(tokenAccount, "confirmed");
+  if (!info?.data) return 0n;
+  const dec = AccountLayout.decode(info.data);
+  return dec.amount as unknown as bigint;
 }
 
 function asPk(x: any, label: string): PublicKey {
@@ -330,7 +341,7 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     };
   });
 
-  // fill decoded reserves where accounts exist
+    // fill decoded reserves where accounts exist
   for (let i = 0; i < infos.length && i < points.length; i++) {
     const info = infos[i];
     if (!info?.data) continue;
@@ -352,6 +363,81 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     } catch {
       // ignore decode failures
     }
+  }
+
+  // Normalize bin "reserves" to match vault totals.
+  // This prevents impossible states like bins summing to > vault balances.
+  const baseVaultRaw = await readTokenAccountAmountRaw(pk(poolView.baseVault));
+  const quoteVaultRaw = await readTokenAccountAmountRaw(pk(poolView.quoteVault));
+
+  let sumBase = 0n;
+  let sumQuote = 0n;
+
+  for (const p of points) {
+    sumBase += BigInt(p.baseAtoms);
+    sumQuote += BigInt(p.quoteAtoms);
+  }
+
+  // only scale if mismatch is significant (>5%)
+  const needsBaseScale =
+    sumBase > 0n &&
+    (sumBase > (baseVaultRaw * 105n) / 100n || sumBase < (baseVaultRaw * 95n) / 100n);
+
+  const needsQuoteScale =
+    sumQuote > 0n &&
+    (sumQuote > (quoteVaultRaw * 105n) / 100n || sumQuote < (quoteVaultRaw * 95n) / 100n);
+
+  function scaleSide(
+    total: bigint,
+    sum: bigint,
+    getAtoms: (p: BinPoint) => bigint,
+    setAtoms: (p: BinPoint, v: bigint) => void
+  ) {
+    if (sum <= 0n) return;
+
+    const nonzero = points.filter((p) => getAtoms(p) > 0n);
+    if (nonzero.length === 0) return;
+
+    let used = 0n;
+    for (let i = 0; i < nonzero.length; i++) {
+      const p = nonzero[i]!;
+      if (i === nonzero.length - 1) {
+        // last one gets exact remainder so totals match perfectly
+        setAtoms(p, total - used);
+      } else {
+        const v = (getAtoms(p) * total) / sum;
+        setAtoms(p, v);
+        used += v;
+      }
+    }
+  }
+
+  if (needsBaseScale) {
+    scaleSide(
+      baseVaultRaw,
+      sumBase,
+      (p) => BigInt(p.baseAtoms),
+      (p, v) => {
+        p.baseAtoms = v.toString();
+      }
+    );
+  }
+
+  if (needsQuoteScale) {
+    scaleSide(
+      quoteVaultRaw,
+      sumQuote,
+      (p) => BigInt(p.quoteAtoms),
+      (p, v) => {
+        p.quoteAtoms = v.toString();
+      }
+    );
+  }
+
+  // recompute UI after scaling
+  for (const p of points) {
+    p.baseUi = toUi(p.baseAtoms, poolView.baseDecimals);
+    p.quoteUi = toUi(p.quoteAtoms, poolView.quoteDecimals);
   }
 
   const bins = points

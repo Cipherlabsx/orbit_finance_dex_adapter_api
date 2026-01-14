@@ -81,7 +81,7 @@ app.decorate("poolsList", [...poolsFromEnv]);
 await app.register(v1Routes, { prefix: "/api/v1" });
 
 /**
- * CRITICAL INVARIANT:
+ * CRITICAL INVARIANT: TODO
  * The /dex endpoint returns app.poolsList (discovered pools).
  * The /pools endpoint uses listIndexedPools(app.tradeStore) which is based on tradeStore.byPool keys.
  *

@@ -245,55 +245,53 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
   const seenKey = `${sig}:${pool}`;
   if (store.seen.has(seenKey)) return;
 
-  let tx: VersionedTransactionResponse | null = null;
-  try {
-    tx = await connection.getTransaction(sig, {
-      maxSupportedTransactionVersion: 0,
-      commitment: "confirmed",
+    let tx: VersionedTransactionResponse | null = null;
+    try {
+      tx = await connection.getTransaction(sig, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
+    } catch {
+      // DON'T mark seen, RPC can fail retry later
+      return;
+    }
+
+    if (!tx) {
+      // DON'T mark seen, tx might be temporarily unavailable
+      return;
+    }
+
+    const logs = tx.meta?.logMessages ?? null;
+    const isSwap = detectSwapFromLogs(logs) || detectSwapFromInstructions(tx);
+
+    if (!isSwap) {
+      // definitive "not a swap" -> safe to mark seen
+      store.seen.add(seenKey);
+      return;
+    }
+
+    let poolMini: PoolMini;
+    try {
+      poolMini = await getPoolMini(pool);
+    } catch {
+      // DON'T mark seen, retry later
+      return;
+    }
+
+    const trade = deriveTradeFromTransaction(tx, {
+      pool,
+      baseVault: poolMini.baseVault,
+      quoteVault: poolMini.quoteVault,
+      baseMint: poolMini.baseMint,
+      quoteMint: poolMini.quoteMint,
     });
-  } catch {
-    store.seen.add(seenKey);
-    return;
+
+    if (!trade) {
+      return;
+    }
+
+    pushTrade(store, trade); // pushTrade marks seen for sig:pool
   }
-
-  if (!tx) {
-    store.seen.add(seenKey);
-    return;
-  }
-
-  const logs = tx.meta?.logMessages ?? null;
-  const isSwap = detectSwapFromLogs(logs) || detectSwapFromInstructions(tx);
-
-  if (!isSwap) {
-    store.seen.add(seenKey);
-    return;
-  }
-
-  // pool vault/mints (cached)
-  let poolMini: PoolMini;
-  try {
-    poolMini = await getPoolMini(pool);
-  } catch {
-    store.seen.add(seenKey);
-    return;
-  }
-
-  // Derive Trade via shared helper
-  const trade = deriveTradeFromTransaction(tx, {
-    pool,
-    baseVault: poolMini.baseVault,
-    quoteVault: poolMini.quoteVault,
-    baseMint: poolMini.baseMint,
-    quoteMint: poolMini.quoteMint,
-  });
-
-  if (!trade) {
-    store.seen.add(seenKey);
-    return;
-  }
-
-  pushTrade(store, trade);
-}
 
 /**
  * LIVE polling (recent signatures)
@@ -309,8 +307,8 @@ export async function pollTrades(store: TradeStore, pools: string[]) {
       continue;
     }
 
-    for (const s of sigs) {
-      const sig = s.signature;
+    for (let i = sigs.length - 1; i >= 0; i--) {
+      const sig = sigs[i]!.signature;
       if (!sig) continue;
       await processSignatureForPool(store, pool, sig);
     }
@@ -347,8 +345,8 @@ export async function backfillTrades(store: TradeStore, pools: string[]) {
       fetched += sigs.length;
       before = sigs[sigs.length - 1]?.signature;
 
-      for (const s of sigs) {
-        const sig = s.signature;
+      for (let i = sigs.length - 1; i >= 0; i--) {
+        const sig = sigs[i]!.signature;
         if (!sig) continue;
         await processSignatureForPool(store, pool, sig);
       }

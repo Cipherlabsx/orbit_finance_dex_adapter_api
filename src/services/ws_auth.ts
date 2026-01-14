@@ -4,9 +4,9 @@ import { env } from "../config.js";
 function b64url(buf: Buffer) {
   return buf
     .toString("base64")
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll("=", "");
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
 }
 
 function timingSafeEq(a: string, b: string) {
@@ -31,6 +31,7 @@ function cleanupSeen() {
 }
 
 export function verifyWsTicket(ticket: string | null): { ok: true } | { ok: false; reason: string } {
+  if (!env.WS_TOKEN) return { ok: false, reason: "missing_server_secret" };
   if (!ticket) return { ok: false, reason: "missing_ticket" };
 
   const parts = ticket.split(".");
@@ -58,4 +59,16 @@ export function verifyWsTicket(ticket: string | null): { ok: true } | { ok: fals
   seen.set(key, Date.now() + ttlMs * 2);
 
   return { ok: true };
+}
+
+export function mintWsTicket(): { ticket: string; tsSec: number; expiresInSec: number } {
+  if (!env.WS_TOKEN) {
+    throw new Error("missing_server_secret");
+  }
+
+  const tsSec = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomBytes(16).toString("hex"); // 32 chars
+  const ticket = signWsTicket(tsSec, nonce);
+
+  return { ticket, tsSec, expiresInSec: env.WS_TTL_SEC };
 }

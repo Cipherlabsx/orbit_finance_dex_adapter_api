@@ -5,8 +5,29 @@ import { deriveTradeFromTransaction } from "./trade_derivation.js";
 import { readPool } from "./pool_reader.js";
 import { decodeEventsFromLogs } from "../idl/coder.js";
 import { upsertDexPool, writeDexEvent, writeDexTrade } from "../supabase.js";
+import type { WsHub } from "./ws.js";
 
-export type WsHub = { broadcast: (msg: any) => void };
+type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
+type JsonObject = { [k: string]: JsonValue };
+
+type AnchorEvent = {
+  name: string;
+  data?: JsonObject | null;
+};
+
+function poolFromEventData(data: JsonObject | null | undefined): string | null {
+  if (!data) return null;
+
+  const pool = data["pool"];
+  const pairId = data["pairId"];
+  const poolId = data["poolId"];
+
+  if (typeof pool === "string") return pool;
+  if (typeof pairId === "string") return pairId;
+  if (typeof poolId === "string") return poolId;
+
+  return null;
+}
 
 export function startProgramLogStream(params: {
   connection: Connection;
@@ -41,11 +62,11 @@ export function startProgramLogStream(params: {
       if (!tx) return;
 
       const logs = (tx.meta?.logMessages ?? []) as string[];
-      const decoded = decodeEventsFromLogs(logs); // Anchor events (program emits them)
 
-      // ALWAYS persist events:
-      // - If Anchor events exist: store one row per event
-      // - Else: store a single "tx" row with raw logs
+      // NOTE: decodeEventsFromLogs must return something compatible with AnchorEvent[]
+      const decoded = decodeEventsFromLogs(logs) as AnchorEvent[];
+
+      // ALWAYS persist events
       try {
         if (decoded.length > 0) {
           let i = 0;
@@ -61,9 +82,19 @@ export function startProgramLogStream(params: {
               logs,
             });
 
+            const evtPool = poolFromEventData(evt.data ?? null);
+
             wsHub.broadcast({
               type: "event",
-              data: { signature: sig, slot: tx.slot, event: evt },
+              pool: evtPool ?? undefined,
+              data: {
+                signature: sig,
+                slot: tx.slot ?? null,
+                blockTime: tx.blockTime ?? null,
+                event: evt.data
+                  ? { name: evt.name, data: evt.data }
+                  : { name: evt.name },
+              },
             });
           }
         } else {
@@ -80,7 +111,14 @@ export function startProgramLogStream(params: {
 
           wsHub.broadcast({
             type: "event",
-            data: { signature: sig, slot: tx.slot, event: { name: "tx" } },
+            data: {
+              signature: sig,
+              slot: tx.slot ?? null,
+              blockTime: tx.blockTime ?? null,
+              event: {
+                name: "tx",
+              },
+            },
           });
         }
       } catch {
@@ -88,15 +126,12 @@ export function startProgramLogStream(params: {
       }
 
       // Materialize swaps into dex_trades (market data)
-      // We keep your “strict derivation via vault deltas”.
       const msg = tx.transaction.message;
 
       const accountKeys =
         "accountKeys" in msg
-          ? // legacy
-            (msg.accountKeys as PublicKey[])
-          : // v0
-            ([
+          ? (msg.accountKeys as PublicKey[])
+          : ([
               ...msg.staticAccountKeys,
               ...(tx.meta?.loadedAddresses?.writable ?? []),
               ...(tx.meta?.loadedAddresses?.readonly ?? []),
@@ -150,7 +185,8 @@ export function startProgramLogStream(params: {
           // ignore
         }
 
-        wsHub.broadcast({ type: "trade", data: trade });
+        // ✅ include pool so ws hub can route to subscribers
+        wsHub.broadcast({ type: "trade", pool, data: trade });
 
         // because dex_trades PK is signature-only, do NOT try to insert multiple pools per tx.
         break;

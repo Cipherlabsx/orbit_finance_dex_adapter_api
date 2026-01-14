@@ -14,6 +14,8 @@ import { reqId } from "./utils/http.js";
 
 import { createWsHub } from "./services/ws.js";
 import { startProgramLogStream } from "./services/program_ws.js";
+import { createVolumeStore, ingestFromTradeStore, startVolumeAggregator } from "./services/volume_aggregator.js";
+import { createCandleStore, ingestCandlesFromTradeStore, startCandleAggregator } from "./services/candle_aggregator.js";
 
 /**
  * Logger
@@ -64,6 +66,10 @@ app.decorate("dexKey", env.DEX_KEY);
 app.decorate("programId", PROGRAM_ID.toBase58());
 app.decorate("tradeStore", createTradeStore());
 app.decorate("wsHub", createWsHub());
+
+// NEW: in-memory aggregation stores
+app.decorate("volumeStore", createVolumeStore());
+app.decorate("candleStore", createCandleStore());
 
 /**
  * poolsList is the canonical list used by:
@@ -137,9 +143,32 @@ seedPoolsIntoTradeStore(app.poolsList);
 await backfillTrades(app.tradeStore, app.poolsList);
 
 /**
+ * NEW: seed volume + candles once from whatever is currently in tradeStore
+ * (so DB isn't empty on boot)
+ */
+await ingestFromTradeStore(app.volumeStore, app.tradeStore, app.poolsList);
+await ingestCandlesFromTradeStore(app.candleStore, app.tradeStore, app.poolsList);
+
+/**
  * Start polling-based trade indexer
  */
 const indexer = startTradeIndexer(app.tradeStore, app.poolsList);
+
+/**
+ * NEW: start aggregators
+ * (these loops will keep DB up to date via SERVICE_ROLE_KEY inside the aggregators)
+ */
+const volumeAgg = startVolumeAggregator({
+  tradeStore: app.tradeStore,
+  volumeStore: app.volumeStore,
+  pools: app.poolsList,
+});
+
+const candleAgg = startCandleAggregator({
+  tradeStore: app.tradeStore,
+  candleStore: app.candleStore,
+  pools: app.poolsList,
+});
 
 /**
  * Start WebSocket program log stream
@@ -165,7 +194,11 @@ const interval = setInterval(
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, "shutting down");
   clearInterval(interval);
+
   indexer.stop();
+  volumeAgg.stop();
+  candleAgg.stop();
+
   await programStream.stop().catch(() => {});
   try {
     await app.close();

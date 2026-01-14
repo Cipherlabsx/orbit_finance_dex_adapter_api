@@ -31,13 +31,28 @@ export const env = z
     DEX_KEY: z.string().min(2).default("orbit_finance"),
 
     // Historic backfill
-    // 0 disables backfill
     BACKFILL_MAX_SIGNATURES_PER_POOL: z.coerce.number().int().min(0).max(250_000).default(0),
-    // page size for `getSignaturesForAddress` pagination
     BACKFILL_PAGE_SIZE: z.coerce.number().int().min(10).max(1000).default(500),
+
+    // Used server-side ONLY to parse req.url correctly
+    HTTP_BASE_DEV: z.string().url().default("http://localhost:8080"),
+    HTTP_BASE_PROD: z.string().url().optional(),
+
+    // Used by clients (not server, but validated here)
+    WS_BASE_DEV: z.string().optional(),
+    WS_BASE_PROD: z.string().optional(),
+
+    // Private WS auth token (server secret)
+    WS_TOKEN: z.string().min(32),
+    // ticket auth settings
+    WS_TTL_SEC: z.coerce.number().int().min(5).max(300).default(30),
+    WS_SKEW_SEC: z.coerce.number().int().min(0).max(60).default(5),
   })
   .parse(process.env);
 
+/**
+ * Derived helpers
+ */
 export const corsOrigins = env.CORS_ORIGINS ? csv(env.CORS_ORIGINS) : [];
 
 /**
@@ -45,3 +60,19 @@ export const corsOrigins = env.CORS_ORIGINS ? csv(env.CORS_ORIGINS) : [];
  * If empty, discovery will populate at runtime.
  */
 export const poolsFromEnv: string[] = env.POOLS ? csv(env.POOLS) : [];
+
+/**
+ * HTTP base used to safely parse req.url in WS handlers
+ */
+export const HTTP_BASE =
+  process.env.NODE_ENV === "production"
+    ? env.HTTP_BASE_PROD ?? env.HTTP_BASE_DEV
+    : env.HTTP_BASE_DEV;
+
+/**
+ * WS base (exposed for clients)
+ */
+export const WS_BASE =
+  process.env.NODE_ENV === "production"
+    ? env.WS_BASE_PROD ?? env.WS_BASE_DEV
+    : env.WS_BASE_DEV;

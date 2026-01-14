@@ -12,7 +12,7 @@ import {
 import { connection, pk, PROGRAM_ID } from "../solana.js";
 import { env } from "../config.js";
 import { readPool } from "./pool_reader.js";
-import { MintLayout } from "@solana/spl-token";
+import { deriveTradeFromTransaction } from "./trade_derivation.js";
 
 export type Trade = {
   signature: string;
@@ -88,7 +88,7 @@ function detectSwapFromLogs(logs: readonly string[] | null | undefined): boolean
 
 /**
  * Instruction shapes we may see from getTransaction() JSON response.
- * We only need `programIdIndex` + `data` in compiled form.
+ * Only need `programIdIndex` + `data` in compiled form.
  */
 type CompiledInstructionLike = {
   programIdIndex: number;
@@ -150,7 +150,9 @@ function detectSwapFromInstructions(tx: VersionedTransactionResponse): boolean {
   }
 }
 
-function readDiscriminatorFromAnyData(data: string | Uint8Array | Buffer | null | undefined): Buffer | null {
+function readDiscriminatorFromAnyData(
+  data: string | Uint8Array | Buffer | null | undefined
+): Buffer | null {
   if (!data) return null;
 
   if (Buffer.isBuffer(data)) return data.length >= 8 ? data.subarray(0, 8) : null;
@@ -176,30 +178,6 @@ function readDiscriminatorFromAnyData(data: string | Uint8Array | Buffer | null 
   }
 
   return null;
-}
-
-/**
- * Token balance shape we need (RPC jsonParsed style).
- */
-type UiTokenAmount = { amount?: string };
-type TokenBalanceLike = { accountIndex?: number; uiTokenAmount?: UiTokenAmount };
-
-/**
- * Vault delta extraction
- */
-function toAmountMap(balances: readonly TokenBalanceLike[] | null | undefined): Map<number, bigint> {
-  const m = new Map<number, bigint>();
-  for (const b of balances ?? []) {
-    const idx = Number(b.accountIndex);
-    const raw = b.uiTokenAmount?.amount;
-    if (!Number.isFinite(idx) || typeof raw !== "string") continue;
-    try {
-      m.set(idx, BigInt(raw));
-    } catch {
-      // ignore parse errors
-    }
-  }
-  return m;
 }
 
 type AccountKeyLike = PublicKey | string | { pubkey: PublicKey };
@@ -235,39 +213,6 @@ function getAllAccountKeys(tx: VersionedTransactionResponse): AccountKeyLike[] {
   return [...staticKeys, ...loadedWritable, ...loadedReadonly];
 }
 
-function findAccountIndex(tx: VersionedTransactionResponse, address: string): number {
-  const keys = getAllAccountKeys(tx);
-  for (let i = 0; i < keys.length; i++) {
-    const s = keyToString(keys[i] ?? null);
-    if (s === address) return i;
-  }
-  return -1;
-}
-
-function getFeePayer(tx: VersionedTransactionResponse): string | null {
-  const keys = getAllAccountKeys(tx);
-  return keyToString(keys[0] ?? null);
-}
-
-function computeVaultDeltas(tx: VersionedTransactionResponse, baseVault: string, quoteVault: string) {
-  const baseIdx = findAccountIndex(tx, baseVault);
-  const quoteIdx = findAccountIndex(tx, quoteVault);
-  if (baseIdx < 0 || quoteIdx < 0) return null;
-
-  const pre = toAmountMap((tx.meta?.preTokenBalances ?? null) as readonly TokenBalanceLike[] | null);
-  const post = toAmountMap((tx.meta?.postTokenBalances ?? null) as readonly TokenBalanceLike[] | null);
-
-  const basePre = pre.get(baseIdx) ?? 0n;
-  const basePost = post.get(baseIdx) ?? 0n;
-  const quotePre = pre.get(quoteIdx) ?? 0n;
-  const quotePost = post.get(quoteIdx) ?? 0n;
-
-  return {
-    baseDelta: basePost - basePre,
-    quoteDelta: quotePost - quotePre,
-  };
-}
-
 // Pool cache
 type PoolMini = {
   baseVault: string;
@@ -294,40 +239,6 @@ async function getPoolMini(pool: string): Promise<PoolMini> {
 
   POOL_CACHE.set(pool, { ts: now, v });
   return v;
-}
-
-// mint decimals cache
-const MINT_DEC_CACHE = new Map<string, { ts: number; dec: number }>();
-const MINT_DEC_TTL_MS = 60_000;
-
-async function getMintDecimalsCached(mint: string): Promise<number> {
-  const now = Date.now();
-  const hit = MINT_DEC_CACHE.get(mint);
-  if (hit && now - hit.ts < MINT_DEC_TTL_MS) return hit.dec;
-
-  const info = await connection.getAccountInfo(pk(mint), "confirmed");
-  if (!info?.data) return 0;
-
-  const dec = Number(MintLayout.decode(info.data).decimals ?? 0);
-  MINT_DEC_CACHE.set(mint, { ts: now, dec });
-  return dec;
-}
-
-// lazy import so this file doesn't hard-require supabase during tests
-async function writeVolumeToSupabase(params: {
-  trade: Trade;
-  quoteMint: string;
-  quoteDecimals: number;
-  quoteValue: number; // quote units (e.g. USDC)
-}) {
-  try {
-    const mod = await import("../supabase.js");
-    if (typeof mod.writeTradeAndVolume === "function") {
-      await mod.writeTradeAndVolume(params);
-    }
-  } catch {
-    // ignore
-  }
 }
 
 async function processSignatureForPool(store: TradeStore, pool: string, sig: string) {
@@ -358,7 +269,7 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
     return;
   }
 
-  // derive amounts from vault balance deltas
+  // pool vault/mints (cached)
   let poolMini: PoolMini;
   try {
     poolMini = await getPoolMini(pool);
@@ -367,79 +278,21 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
     return;
   }
 
-  const deltas = computeVaultDeltas(tx, poolMini.baseVault, poolMini.quoteVault);
-  if (!deltas) {
-    store.seen.add(seenKey);
-    return;
-  }
-
-  const { baseDelta, quoteDelta } = deltas;
-
-  if (baseDelta === 0n && quoteDelta === 0n) {
-    store.seen.add(seenKey);
-    return;
-  }
-
-  let inMint: string | null = null;
-  let outMint: string | null = null;
-  let amountIn: string | null = null;
-  let amountOut: string | null = null;
-
-  // vault increased => token went in (user paid that token)
-  // vault decreased => token went out (user received that token)
-  if (baseDelta > 0n && quoteDelta < 0n) {
-    // user paid base, received quote
-    inMint = poolMini.baseMint;
-    outMint = poolMini.quoteMint;
-    amountIn = baseDelta.toString();
-    amountOut = (-quoteDelta).toString();
-  } else if (quoteDelta > 0n && baseDelta < 0n) {
-    // user paid quote, received base
-    inMint = poolMini.quoteMint;
-    outMint = poolMini.baseMint;
-    amountIn = quoteDelta.toString();
-    amountOut = (-baseDelta).toString();
-  } else {
-    // liquidity ops / multi-legged tx
-    store.seen.add(seenKey);
-    return;
-  }
-
-  const trade: Trade = {
-    signature: sig,
-    slot: tx.slot,
-    blockTime: tx.blockTime ?? null,
+  // Derive Trade via shared helper
+  const trade = deriveTradeFromTransaction(tx, {
     pool,
-    user: getFeePayer(tx),
-    inMint,
-    outMint,
-    amountIn,
-    amountOut,
-  };
+    baseVault: poolMini.baseVault,
+    quoteVault: poolMini.quoteVault,
+    baseMint: poolMini.baseMint,
+    quoteMint: poolMini.quoteMint,
+  });
+
+  if (!trade) {
+    store.seen.add(seenKey);
+    return;
+  }
 
   pushTrade(store, trade);
-
-  // compute quote-based volume (no price required)
-  const quoteMint = poolMini.quoteMint;
-  const quoteDecimals = await getMintDecimalsCached(quoteMint);
-
-  let quoteRaw = 0n;
-  try {
-    if (trade.inMint === quoteMint && trade.amountIn) quoteRaw = BigInt(trade.amountIn);
-    else if (trade.outMint === quoteMint && trade.amountOut) quoteRaw = BigInt(trade.amountOut);
-  } catch {
-    // ignore
-  }
-
-  const quoteValue = Number(quoteRaw) / 10 ** quoteDecimals;
-
-  // store to supabase (best effort, never breaks indexer loop)
-  await writeVolumeToSupabase({
-    trade,
-    quoteMint,
-    quoteDecimals,
-    quoteValue: Number.isFinite(quoteValue) ? quoteValue : 0,
-  });
 }
 
 /**

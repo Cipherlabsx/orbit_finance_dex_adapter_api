@@ -1,16 +1,32 @@
-import type { Trade } from "./trades_indexer.js";
+import WebSocket from "ws";
 
-type Client = { send: (data: string) => void };
-const clients = new Set<Client>();
+export type WsHub = {
+  add(ws: WebSocket): void;
+  remove(ws: WebSocket): void;
+  broadcast(payload: unknown): void;
+  size(): number;
+};
 
-export function wsRegister(client: Client) {
-  clients.add(client);
-  return () => clients.delete(client);
-}
+export function createWsHub(): WsHub {
+  const clients = new Set<WebSocket>();
 
-export function wsBroadcastTrade(t: Trade) {
-  const msg = JSON.stringify({ type: "trade", trade: t });
-  for (const c of clients) {
-    try { c.send(msg); } catch { /* ignore */ }
-  }
+  return {
+    add(ws) {
+      clients.add(ws);
+    },
+    remove(ws) {
+      clients.delete(ws);
+    },
+    broadcast(payload) {
+      const msg = JSON.stringify(payload);
+      for (const ws of clients) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(msg);
+        }
+      }
+    },
+    size() {
+      return clients.size;
+    },
+  };
 }

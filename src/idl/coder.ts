@@ -25,3 +25,45 @@ export const DISCRIMINATORS = {
   LiquidityBin: Buffer.from([4, 80, 150, 39, 152, 88, 42, 158]),
   PairRegistry: Buffer.from([180, 142, 99, 6, 243, 194, 134, 152]),
 };
+
+// EVENTS (Anchor "Program data: <base64>")
+
+export type OrbitDecodedEvent = {
+  name: string;
+  data: Record<string, any>;
+};
+
+/**
+ * Try decode ONE log line that looks like:
+ *   "Program data: <base64>"
+ *
+ * Anchor emits event payloads this way.
+ */
+export function decodeEventLogLine(logLine: string): OrbitDecodedEvent | null {
+  if (!logLine.startsWith("Program data: ")) return null;
+
+  try {
+    const b64 = logLine.slice("Program data: ".length).trim();
+
+    // Anchor expects base64 STRING here (typing is correct, runtime matches)
+    const evt = coder.events.decode(b64);
+    if (!evt) return null;
+
+    return { name: evt.name, data: evt.data as any };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decode ALL events from a full logs array.
+ */
+export function decodeEventsFromLogs(logs: readonly string[] | null | undefined): OrbitDecodedEvent[] {
+  if (!logs || logs.length === 0) return [];
+  const out: OrbitDecodedEvent[] = [];
+  for (const line of logs) {
+    const e = decodeEventLogLine(line);
+    if (e) out.push(e);
+  }
+  return out;
+}

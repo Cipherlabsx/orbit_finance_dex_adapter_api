@@ -6,11 +6,14 @@ import pino from "pino";
 import pretty from "pino-pretty";
 
 import { env, corsOrigins, poolsFromEnv } from "./config.js";
-import { PROGRAM_ID } from "./solana.js";
+import { PROGRAM_ID, connection } from "./solana.js";
 import { v1Routes } from "./routes/v1.js";
 import { backfillTrades, createTradeStore, startTradeIndexer } from "./services/trades_indexer.js";
 import { discoverPools } from "./services/fetch_pools.js";
 import { reqId } from "./utils/http.js";
+
+import { createWsHub } from "./services/ws.js";
+import { startProgramLogStream } from "./services/program_ws.js";
 
 /**
  * Logger
@@ -20,18 +23,6 @@ const logger =
   process.env.NODE_ENV === "production"
     ? pino({ level: env.LOG_LEVEL })
     : pino(pretty({ colorize: true, translateTime: "SYS:standard" }));
-
-/**
- * Extend Fastify instance typing for app.decorate()
- */
-declare module "fastify" {
-  interface FastifyInstance {
-    dexKey: string;
-    programId: string;
-    tradeStore: ReturnType<typeof createTradeStore>;
-    poolsList: string[];
-  }
-}
 
 const app = Fastify({
   logger,
@@ -72,6 +63,7 @@ await app.register(rateLimit, {
 app.decorate("dexKey", env.DEX_KEY);
 app.decorate("programId", PROGRAM_ID.toBase58());
 app.decorate("tradeStore", createTradeStore());
+app.decorate("wsHub", createWsHub());
 
 /**
  * poolsList is the canonical list used by:
@@ -82,6 +74,10 @@ app.decorate("tradeStore", createTradeStore());
  * Start with POOLS env if provided otherwise it may be filled by discovery.
  */
 app.decorate("poolsList", [...poolsFromEnv]);
+
+/**
+ * Register API routes
+ */
 await app.register(v1Routes, { prefix: "/api/v1" });
 
 /**
@@ -91,10 +87,6 @@ await app.register(v1Routes, { prefix: "/api/v1" });
  *
  * If you never "seed" tradeStore.byPool with discovered pools, it remains empty
  * until a trade is seen. That makes /pools return [] even while /dex returns pools.
- *
- * This function ensures:
- * - Every pool in app.poolsList has an entry in tradeStore.byPool immediately.
- * - We never delete anything from tradeStore.
  */
 function seedPoolsIntoTradeStore(pools: string[]) {
   for (const pool of pools) {
@@ -106,12 +98,8 @@ function seedPoolsIntoTradeStore(pools: string[]) {
 
 /**
  * Pool list strategy:
- * - If POOLS env is provided => we use that allowlist and DO NOT need discovery.
- * - If POOLS is empty AND DISCOVER_POOLS=true => discover on-chain pools at startup.
- * - Refresh periodically so newly created pools appear without redeploy.
- *
- * - We replace app.poolsList IN-PLACE so any references stay valid.
- * - We then seed tradeStore so /pools works immediately.
+ * - If POOLS env is provided => static allowlist
+ * - Else discover on-chain pools
  */
 async function refreshPools(reason: string) {
   if (!env.DISCOVER_POOLS) return;
@@ -123,7 +111,7 @@ async function refreshPools(reason: string) {
     app.poolsList.length = 0;
     app.poolsList.push(...discovered);
 
-    // Seed trade store for immediate visibility in /pools
+    // Seed trade store for immediate visibility
     seedPoolsIntoTradeStore(app.poolsList);
 
     app.log.info(
@@ -131,15 +119,12 @@ async function refreshPools(reason: string) {
       "pools discovered"
     );
   } catch (e) {
-    // Never crash the process because discovery failed - keep serving last-known state.
     app.log.warn({ err: e, reason }, "pool discovery failed");
   }
 }
 
 /**
- * Startup behavior:
- * - If POOLS env is empty => discover pools once at startup.
- * - Always seed tradeStore for whatever poolsList currently contains.
+ * Startup behavior
  */
 if (app.poolsList.length === 0) {
   await refreshPools("startup");
@@ -147,22 +132,27 @@ if (app.poolsList.length === 0) {
 seedPoolsIntoTradeStore(app.poolsList);
 
 /**
- * One-time historic backfill on startup
- * Controlled by:
- *   BACKFILL_MAX_SIGNATURES_PER_POOL
- *   BACKFILL_PAGE_SIZE
+ * One-time historic backfill
  */
 await backfillTrades(app.tradeStore, app.poolsList);
 
 /**
- * Start live polling indexer (recent trades)
+ * Start polling-based trade indexer
  */
 const indexer = startTradeIndexer(app.tradeStore, app.poolsList);
 
 /**
+ * Start WebSocket program log stream
+ */
+const programStream = startProgramLogStream({
+  connection,
+  programId: PROGRAM_ID,
+  store: app.tradeStore,
+  wsHub: app.wsHub,
+});
+
+/**
  * Periodic discovery refresh
- * - Adds newly created pools automatically
- * - Does not remove anything from tradeStore
  */
 const interval = setInterval(
   () => refreshPools("periodic"),
@@ -171,25 +161,24 @@ const interval = setInterval(
 
 /**
  * Graceful shutdown
- * - Stop discovery refresh timer
- * - Stop indexer loop
- * - Close Fastify server
  */
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, "shutting down");
   clearInterval(interval);
   indexer.stop();
+  await programStream.stop().catch(() => {});
   try {
     await app.close();
   } finally {
     process.exit(0);
   }
 };
+
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 /**
- * Listen (Fly expects host 0.0.0.0)
+ * Listen to server
  */
 await app.listen({ port: env.PORT, host: "0.0.0.0" });
 

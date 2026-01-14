@@ -1,12 +1,14 @@
 import type { FastifyInstance } from "fastify";
+import websocket from "@fastify/websocket";
 import { z } from "zod";
 
-import { env, poolsFromEnv } from "../config.js";
+import { env, HTTP_BASE, poolsFromEnv } from "../config.js";
 import { readBins, readPool } from "../services/pool_reader.js";
 import { getTrades, listIndexedPools } from "../services/trades_indexer.js";
 import { readAsset } from "../services/assets.js";
 import { readPair } from "../services/pairs.js";
 import { readEventsBySlotRange, readLatestBlock } from "../services/events.js";
+import { verifyWsTicket } from "../services/ws_auth.js";
 
 /**
  * Small helper: choose pool set.
@@ -29,6 +31,42 @@ function assertPoolAllowed(pool: string) {
 }
 
 export async function v1Routes(app: FastifyInstance) {
+  /**
+   * WebSocket endpoint:
+   *   wss://<host>/api/v1/ws
+   *
+   * Broadcast happens from Solana WS subscription (program_ws.ts) via app.wsHub.broadcast(...)
+   */
+  await app.register(websocket);
+
+  app.get("/ws", { websocket: true }, (conn, req) => {
+    const url = new URL(req.url, HTTP_BASE);
+    const ticket = url.searchParams.get("ticket");
+    const v = verifyWsTicket(ticket);
+
+    if (!v.ok) {
+      conn.socket.close(1008, `unauthorized:${v.reason}`);
+      return;
+    }
+
+    app.wsHub.add(conn.socket);
+
+    conn.socket.send(
+      JSON.stringify({
+        type: "hello",
+        programId: app.programId,
+        ts: Date.now(),
+      })
+    );
+
+    conn.socket.on("close", () => {
+      app.wsHub.remove(conn.socket);
+    });
+
+    // read-only WS: ignore incoming messages
+    conn.socket.on("message", () => {});
+  });
+
   app.get("/health", async () => ({ ok: true }));
 
   app.get("/dex", async () => {
@@ -108,14 +146,6 @@ export async function v1Routes(app: FastifyInstance) {
       .parse((req.query ?? {}) as any);
 
     if (q.toBlock < q.fromBlock) return { events: [] };
-
-    // if POOLS allowlist is configured, filter events down to those pools
-    // (events reader can do filtering itself, but this ensures "only allowed pools" for partners)
-    if (poolsFromEnv.length > 0) {
-      // If your standards_events implementation supports filtering internally, prefer that.
-      // Here we just call it and let it emit only what exists in tradeStore, tradeStore itself
-      // can be constrained by discovery/POOLS in indexer bootstrap.
-    }
 
     // Solana mapping: blockNumber == slot
     return await readEventsBySlotRange(app.tradeStore, q.fromBlock, q.toBlock);

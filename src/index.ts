@@ -159,11 +159,6 @@ await ingestFromTradeStore(app.volumeStore, app.tradeStore, app.poolsList);
 await ingestCandlesFromTradeStore(app.candleStore, app.tradeStore, app.poolsList);
 
 /**
- * Listen to Streamflow events
- */
-await streamflowAgg.stop().catch(() => {});
-
-/**
  * Start polling-based trade indexer
  */
 const indexer = startTradeIndexer(app.tradeStore, app.poolsList);
@@ -212,6 +207,8 @@ const shutdown = async (signal: string) => {
   indexer.stop();
   volumeAgg.stop();
   candleAgg.stop();
+
+  await streamflowAgg.stop().catch(() => {});
 
   await programStream.stop().catch(() => {});
   try {

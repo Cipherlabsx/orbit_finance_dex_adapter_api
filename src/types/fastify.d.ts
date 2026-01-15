@@ -17,5 +17,7 @@ declare module "fastify" {
 
     volumeStore: VolumeStore;
     candleStore: CandleStore;
+
+    stakeStore: StreamflowStakeStore;
   }
 }

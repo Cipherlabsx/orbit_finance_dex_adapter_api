@@ -10,6 +10,7 @@ import { readEventsBySlotRange, readLatestBlock } from "../services/events.js";
 import { verifyWsTicket, mintWsTicket } from "../services/ws_auth.js";
 import { getPoolVolumesAll } from "../services/volume_aggregator.js";
 import { getCandles, getCandlesBundle } from "../services/candle_aggregator.js";
+import { getOwnerStreamflowStakes, listStreamflowVaults } from "../services/streamflow_staking_indexer.js";
 
 /**
  * Small helper: choose pool set.
@@ -316,4 +317,17 @@ export async function v1Routes(app: FastifyInstance) {
 
     return getCandlesBundle(app.candleStore, params.pool, q.limit);
   });
+
+  // GET /api/v1/streamflow/vaults
+  app.get("/streamflow/vaults", async () => {
+    return { vaults: listStreamflowVaults((app as any).stakeStore), ts: Date.now() };
+  });
+
+  // GET /api/v1/streamflow/stakes/:owner
+  app.get("/streamflow/stakes/:owner", async (req) => {
+    const params = z.object({ owner: z.string().min(32) }).parse(req.params);
+    const rows = getOwnerStreamflowStakes((app as any).stakeStore, params.owner);
+    return { owner: params.owner, rows, ts: Date.now() };
+  });
 }
+

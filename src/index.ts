@@ -17,6 +17,8 @@ import { startProgramLogStream } from "./services/program_ws.js";
 import { createVolumeStore, ingestFromTradeStore, startVolumeAggregator } from "./services/volume_aggregator.js";
 import { createCandleStore, ingestCandlesFromTradeStore, startCandleAggregator } from "./services/candle_aggregator.js";
 
+import { createStreamflowStakeStore, startStreamflowStakingAggregator } from "./services/streamflow_staking_indexer.js";
+
 /**
  * Logger
  * - Production: structured JSON logs (Fly/Logtail/Datadog)
@@ -66,10 +68,9 @@ app.decorate("dexKey", env.DEX_KEY);
 app.decorate("programId", PROGRAM_ID.toBase58());
 app.decorate("tradeStore", createTradeStore());
 app.decorate("wsHub", createWsHub());
-
-// NEW: in-memory aggregation stores
 app.decorate("volumeStore", createVolumeStore());
 app.decorate("candleStore", createCandleStore());
+app.decorate("stakeStore", createStreamflowStakeStore());
 
 /**
  * poolsList is the canonical list used by:
@@ -130,6 +131,15 @@ async function refreshPools(reason: string) {
 }
 
 /**
+ * Streamflow strategy:
+ * - Start streamflow indexer
+ */
+const streamflowAgg = startStreamflowStakingAggregator({
+  connection,
+  stakeStore: (app as any).stakeStore,
+});
+
+/**
  * Startup behavior
  */
 if (app.poolsList.length === 0) {
@@ -143,11 +153,15 @@ seedPoolsIntoTradeStore(app.poolsList);
 await backfillTrades(app.tradeStore, app.poolsList);
 
 /**
- * NEW: seed volume + candles once from whatever is currently in tradeStore
- * (so DB isn't empty on boot)
+ * seed volume + candles once from whatever is currently in tradeStore
  */
 await ingestFromTradeStore(app.volumeStore, app.tradeStore, app.poolsList);
 await ingestCandlesFromTradeStore(app.candleStore, app.tradeStore, app.poolsList);
+
+/**
+ * Listen to Streamflow events
+ */
+await streamflowAgg.stop().catch(() => {});
 
 /**
  * Start polling-based trade indexer
@@ -155,7 +169,7 @@ await ingestCandlesFromTradeStore(app.candleStore, app.tradeStore, app.poolsList
 const indexer = startTradeIndexer(app.tradeStore, app.poolsList);
 
 /**
- * NEW: start aggregators
+ * start aggregators
  * (these loops will keep DB up to date via SERVICE_ROLE_KEY inside the aggregators)
  */
 const volumeAgg = startVolumeAggregator({
@@ -213,7 +227,12 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 /**
  * Listen to server
  */
-await app.listen({ port: env.PORT, host: "0.0.0.0" });
+const port = Number(process.env.PORT ?? env.PORT ?? 8080);
+
+await app.listen({
+  port,
+  host: "0.0.0.0",
+});
 
 app.log.info(
   {

@@ -47,6 +47,19 @@ export const env = z
     // ticket auth settings
     WS_TTL_SEC: z.coerce.number().int().min(5).max(300).default(30),
     WS_SKEW_SEC: z.coerce.number().int().min(0).max(60).default(5),
+
+    // Streamflow staking
+    STREAMFLOW_BACKFILL_ON_BOOT: z.coerce.boolean().default(false),
+    STREAMFLOW_MAX_SIGS_PER_VAULT: z.coerce.number().int().min(0).max(250_000).default(5000),
+
+    STREAMFLOW_TICK_MS: z.coerce.number().int().min(100).max(60_000).default(500),
+    STREAMFLOW_FLUSH_MS: z.coerce.number().int().min(250).max(300_000).default(2000),
+    STREAMFLOW_WRITE_DB: z.coerce.boolean().default(true),
+
+    // progress logging
+    STREAMFLOW_LOG_EVERY_SCANNED: z.coerce.number().int().min(1).max(10_000).default(500),
+    STREAMFLOW_LOG_EVERY_USED: z.coerce.number().int().min(1).max(10_000).default(25),
+    STREAMFLOW_TX_BATCH: z.coerce.number().int().min(1).max(100).default(10),
   })
   .parse(process.env);
 

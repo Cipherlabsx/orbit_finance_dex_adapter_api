@@ -241,9 +241,40 @@ export async function v1Routes(app: FastifyInstance) {
     const notAllowed = assertPoolAllowed(params.pool);
     if (notAllowed) return notAllowed;
 
-    const row = await dbGetPool(params.pool);
-    if (!row) return { error: "pool_not_found", pool: params.pool };
-    return row;
+    const r = await dbGetPool(params.pool);
+    if (!r) return { error: "pool_not_found", pool: params.pool };
+
+    return {
+      id: r.pool,
+      programId: r.program_id ?? "",
+
+      baseMint: r.base_mint ?? "",
+      quoteMint: r.quote_mint ?? "",
+
+      priceNumber: r.last_price_quote_per_base == null
+        ? null
+        : num(r.last_price_quote_per_base),
+
+      baseVault: r.base_vault ?? "",
+      quoteVault: r.quote_vault ?? "",
+
+      creatorFeeVault: r.creator_fee_vault ?? null,
+      holdersFeeVault: r.holders_fee_vault ?? null,
+      nftFeeVault: r.nft_fee_vault ?? null,
+
+      feesCollected: {
+        creator: num(r.creator_fee_ui),
+        holders: num(r.holders_fee_ui),
+        nft: num(r.nft_fee_ui),
+      },
+
+      feesUpdatedAt: r.fees_updated_at ?? null,
+
+      activeBin: r.active_bin ?? 0,
+      pausedBits: r.paused_bits ?? 0,
+      binStepBps: r.bin_step_bps ?? 0,
+      baseFeeBps: r.base_fee_bps ?? 0,
+    };
   });
 
   app.get("/bins/:pool", async (req) => {

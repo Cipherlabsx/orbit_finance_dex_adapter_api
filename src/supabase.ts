@@ -74,7 +74,7 @@ export async function upsertDexPool(p: {
 /**
  * Writes ONLY real swaps to dex_trades.
  * - If you keep PK(signature): one row per signature (last one wins)
- * - If you migrate to PK(signature,pool): stores multiple pool trades per tx (recommended)
+ * - If you migrate to PK(signature,pool): stores multiple pool trades per tx
  */
 export async function writeDexTrade(trade: Trade) {
   // Only persist real swap trades where we derived amounts + mints
@@ -103,6 +103,7 @@ export async function writeDexEvent(params: {
   blockTime: number | null;
   programId: string;
   eventType: string;
+  txnIndex: number;
   eventIndex: number;
   eventData: any | null;
   logs: string[] | null;
@@ -113,6 +114,7 @@ export async function writeDexEvent(params: {
     block_time: params.blockTime,
     program_id: params.programId,
     event_type: params.eventType,
+    txn_index: params.txnIndex,
     event_index: params.eventIndex,
     event_data: params.eventData,
     logs: params.logs,
@@ -124,5 +126,9 @@ export async function writeDexEvent(params: {
    *  A) unique/PK(signature,event_index,event_type)
    *  B) unique/PK(signature,event_index)
    */
-  await upsertWithFallback("dex_events", row, ["signature,event_index,event_type", "signature,event_index"]);
+  await upsertWithFallback("dex_events", row, [
+    "slot,txn_index,event_index,event_type",
+    "signature,event_index,event_type",
+    "signature,event_index",
+  ]);
 }

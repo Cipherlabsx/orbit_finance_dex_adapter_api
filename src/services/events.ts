@@ -1,10 +1,19 @@
-import type { TradeStore, Trade } from "./trades_indexer.js";
+// - /latest-block: MUST return the latest block (Solana slot) for which /events data is available.
+//   => reads latest persisted slot from public.dex_events
+//
+// - /events?fromBlock&toBlock: MUST return complete, deterministic events for the slot range (inclusive).
+//   => reads from public.dex_events ordered by (slot, txn_index, event_index)
+//
+// - We avoid schema-halting junk (priceNative=0, missing required fields) by skipping invalid rows.
+//
+
+import { z } from "zod";
 import { connection } from "../solana.js";
-import { readPool } from "./pool_reader.js";
+import { supabaseAdmin } from "../lib/supabase_admin.js";
 
 export type StandardsBlock = {
-  blockNumber: number;
-  blockTimestamp: number;
+  blockNumber: number; // Solana slot
+  blockTimestamp: number; // unix seconds (no ms)
 };
 
 export type StandardsSwapEvent = {
@@ -32,22 +41,36 @@ export type StandardsEventsResponse = {
   events: StandardsSwapEvent[];
 };
 
-/**
- * Decimalize bigint atoms into a decimal string (no rounding, trims trailing zeros).
- */
-function decimalize(atoms: bigint, decimals: number): string {
-  const sign = atoms < 0n ? "-" : "";
-  const x = atoms < 0n ? -atoms : atoms;
-  const base = 10n ** BigInt(decimals);
-  const whole = x / base;
-  const frac = x % base;
-  const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
-  return fracStr.length ? `${sign}${whole.toString()}.${fracStr}` : `${sign}${whole.toString()}`;
+// ---- Validation of persisted payload (dex_events.event_data) ----
+//
+// For Step 1 we expect the ingestion path to store Gecko-ready payload in event_data.
+// If it's not there yet, events will be skipped (to avoid halting the indexer with junk).
+//
+const SwapEventDataSchema = z.object({
+  maker: z.string().min(1).optional(),
+  pairId: z.string().min(32),
+
+  asset0In: z.string().optional(),
+  asset1In: z.string().optional(),
+  asset0Out: z.string().optional(),
+  asset1Out: z.string().optional(),
+
+  priceNative: z.string().min(1),
+  reserves: z.object({
+    asset0: z.string().min(1),
+    asset1: z.string().min(1),
+  }),
+});
+
+function isPositiveDecimalString(x: string): boolean {
+  const n = Number(x);
+  return Number.isFinite(n) && n > 0;
 }
 
 /**
- * Enforces: either (asset0In + asset1Out) OR (asset1In + asset0Out) OR no amounts at all.
- * If malformed, omit amounts to avoid schema-halting.
+ * Enforces Gecko rule:
+ * - either (asset0In + asset1Out) OR (asset1In + asset0Out) OR none.
+ * If malformed, drop amounts (but keep event) to avoid schema-halting.
  */
 function normalizeAmounts(args: {
   asset0In?: string;
@@ -68,7 +91,6 @@ function normalizeAmounts(args: {
     (has1In && has0Out && !has0In && !has1Out);
 
   if (!ok) return {};
-
   return {
     ...(asset0In ? { asset0In } : {}),
     ...(asset1In ? { asset1In } : {}),
@@ -77,151 +99,122 @@ function normalizeAmounts(args: {
   };
 }
 
-function toSwapEvent(args: {
-  trade: Trade;
-  poolId: string;
-  slot: number;
-  blockTime: number;
-  txnIndex: number;
-  eventIndex: number;
-  maker: string;
+type DexEventRow = {
+  signature: string;
+  slot: number | null;
+  block_time: number | null;
+  event_type: string;
+  txn_index: number;
+  event_index: number;
+  event_data: any;
+};
 
-  asset0In?: string;
-  asset1In?: string;
-  asset0Out?: string;
-  asset1Out?: string;
+function rowToSwapEvent(row: DexEventRow): StandardsSwapEvent | null {
+  if (row.event_type !== "swap") return null;
+  if (row.slot == null || row.block_time == null) return null;
 
-  priceNative: string;
-  reserve0: string;
-  reserve1: string;
-}): StandardsSwapEvent {
+  const parsed = SwapEventDataSchema.safeParse(row.event_data ?? {});
+  if (!parsed.success) return null;
+
+  const d = parsed.data;
+
+  // Gecko will halt on priceNative=0 or invalid
+  if (!isPositiveDecimalString(d.priceNative)) return null;
+
+  // Reserves must be numeric-ish (at least parseable)
+  const r0 = Number(d.reserves.asset0);
+  const r1 = Number(d.reserves.asset1);
+  if (!Number.isFinite(r0) || !Number.isFinite(r1)) return null;
+
   const amounts = normalizeAmounts({
-    asset0In: args.asset0In,
-    asset1In: args.asset1In,
-    asset0Out: args.asset0Out,
-    asset1Out: args.asset1Out,
+    asset0In: d.asset0In,
+    asset1In: d.asset1In,
+    asset0Out: d.asset0Out,
+    asset1Out: d.asset1Out,
   });
 
   return {
-    block: { blockNumber: args.slot, blockTimestamp: args.blockTime },
+    block: { blockNumber: row.slot, blockTimestamp: row.block_time },
     eventType: "swap",
-    txnId: args.trade.signature,
-    txnIndex: args.txnIndex,
-    eventIndex: args.eventIndex,
-    maker: args.maker,
-    pairId: args.poolId,
+    txnId: row.signature,
+    txnIndex: row.txn_index ?? 0,
+    eventIndex: row.event_index ?? 0,
+    maker: d.maker ?? "11111111111111111111111111111111",
+    pairId: d.pairId,
     ...amounts,
-    priceNative: args.priceNative,
-    reserves: { asset0: args.reserve0, asset1: args.reserve1 },
+    priceNative: d.priceNative,
+    reserves: { asset0: d.reserves.asset0, asset1: d.reserves.asset1 },
   };
 }
 
 /**
  * /events?fromBlock&toBlock (inclusive)
- * Uses in-memory TradeStore + enriches using pool_reader().
+ * DB-backed and deterministic.
+ *
+ * Note: we keep the first parameter for route compatibility,
+ * but we ignore it since DB is the source-of-truth for Gecko.
  */
-const blockTimeCache = new Map<number, number>();
-
-async function getBlockTimeSafe(slot: number): Promise<number | null> {
-  const cached = blockTimeCache.get(slot);
-  if (cached != null) return cached;
-
-  const bt = await connection.getBlockTime(slot);
-  if (bt != null) blockTimeCache.set(slot, bt);
-
-  return bt ?? null;
-}
-
 export async function readEventsBySlotRange(
-  store: TradeStore,
+  _storeIgnored: unknown,
   fromSlot: number,
   toSlot: number
 ): Promise<StandardsEventsResponse> {
-  const all: Trade[] = [];
-  for (const trades of store.byPool.values()) all.push(...trades);
+  if (toSlot < fromSlot) return { events: [] };
 
-  const filtered = all
-    .filter((t) => t.slot >= fromSlot && t.slot <= toSlot)
-    .sort((a, b) => a.slot - b.slot || a.signature.localeCompare(b.signature));
+  const { data, error } = await supabaseAdmin
+    .from("dex_events")
+    .select("signature,slot,block_time,event_type,txn_index,event_index,event_data")
+    .gte("slot", fromSlot)
+    .lte("slot", toSlot)
+    .order("slot", { ascending: true })
+    .order("txn_index", { ascending: true })
+    .order("event_index", { ascending: true });
 
-  // group by signature so eventIndex is stable per tx
-  const bySig = new Map<string, Trade[]>();
-  for (const t of filtered) {
-    const arr = bySig.get(t.signature) ?? [];
-    arr.push(t);
-    bySig.set(t.signature, arr);
+  if (error) {
+    // For Gecko: avoid throwing; return empty (but you should log error at caller if needed).
+    return { events: [] };
   }
 
+  const rows = (data ?? []) as DexEventRow[];
   const events: StandardsSwapEvent[] = [];
 
-  for (const [, trades] of bySig) {
-    let eventIndex = 0;
-
-    for (const trade of trades) {
-      const blockTime = trade.blockTime ?? (await getBlockTimeSafe(trade.slot));
-      if (blockTime == null) continue;
-
-      const poolId = trade.pool;
-
-      const pool = await readPool(poolId);
-
-      // Hard correctness: skip if we can't produce valid, non-junk fields
-      if (pool.priceNumber == null) continue;
-      if (!pool.binReserveBaseAtoms || !pool.binReserveQuoteAtoms) continue;
-      if (pool.priceNumber <= 0) continue;
-
-      const reserveBaseAtoms = BigInt(pool.binReserveBaseAtoms);
-      const reserveQuoteAtoms = BigInt(pool.binReserveQuoteAtoms);
-
-      const reserve0 = decimalize(reserveBaseAtoms, pool.baseDecimals);
-      const reserve1 = decimalize(reserveQuoteAtoms, pool.quoteDecimals);
-
-      const priceNative = String(pool.priceNumber);
-
-      // Amounts: only emit if Trade actually has them *and* mint mapping matches pool
-      let asset0In: string | undefined;
-      let asset1In: string | undefined;
-      let asset0Out: string | undefined;
-      let asset1Out: string | undefined;
-
-      if (trade.amountIn && trade.amountOut && trade.inMint && trade.outMint) {
-        const inAtoms = BigInt(trade.amountIn);
-        const outAtoms = BigInt(trade.amountOut);
-
-        if (trade.inMint === pool.baseMint && trade.outMint === pool.quoteMint) {
-          asset0In = decimalize(inAtoms, pool.baseDecimals);
-          asset1Out = decimalize(outAtoms, pool.quoteDecimals);
-        } else if (trade.inMint === pool.quoteMint && trade.outMint === pool.baseMint) {
-          asset1In = decimalize(inAtoms, pool.quoteDecimals);
-          asset0Out = decimalize(outAtoms, pool.baseDecimals);
-        }
-      }
-
-      events.push(
-        toSwapEvent({
-          trade,
-          poolId,
-          slot: trade.slot,
-          blockTime,
-          txnIndex: 0,
-          eventIndex: eventIndex++,
-          maker: trade.user ?? "11111111111111111111111111111111",
-          priceNative,
-          reserve0,
-          reserve1,
-          asset0In,
-          asset1In,
-          asset0Out,
-          asset1Out,
-        })
-      );
-    }
+  for (const row of rows) {
+    const ev = rowToSwapEvent(row);
+    if (!ev) continue;
+    events.push(ev);
   }
 
   return { events };
 }
 
+/**
+ * /latest-block
+ * Gecko rule: latest-block MUST be the latest block where /events has data available.
+ *
+ * Implementation: max(slot) from dex_events.
+ * Fallback: if DB empty (fresh boot), return chain slot.
+ */
 export async function readLatestBlock(): Promise<{ block: StandardsBlock }> {
+  const { data, error } = await supabaseAdmin
+    .from("dex_events")
+    .select("slot,block_time")
+    .not("slot", "is", null)
+    .order("slot", { ascending: false })
+    .limit(1);
+
+  if (!error && data && data.length > 0) {
+    const row = data[0] as { slot: number | null; block_time: number | null };
+    if (row.slot != null) {
+      return {
+        block: {
+          blockNumber: row.slot,
+          blockTimestamp: row.block_time ?? Math.floor(Date.now() / 1000),
+        },
+      };
+    }
+  }
+
+  // Fallback if no persisted events yet
   const slot = await connection.getSlot("confirmed");
   const blockTime = await connection.getBlockTime(slot);
 

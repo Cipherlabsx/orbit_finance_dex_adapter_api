@@ -2,8 +2,11 @@ import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 import { Connection, PublicKey } from "@solana/web3.js";
 
+import { decodeAccount } from "../idl/coder.js"; // <-- same as pool_reader.js
+
 type DexPoolRow = {
   pool: string;
+
   program_id: string | null;
 
   base_mint: string | null;
@@ -14,7 +17,6 @@ type DexPoolRow = {
   last_price_quote_per_base: string | number | null;
   updated_at: string | null;
 
-  // fields we want to backfill
   base_vault: string | null;
   quote_vault: string | null;
   lp_mint: string | null;
@@ -33,82 +35,102 @@ function mustEnv(name: string): string {
   return v;
 }
 
-// CONFIG
-// batch size for getMultipleAccountsInfo
-const BATCH = Number(process.env.POOL_BACKFILL_BATCH ?? 100);
-const DISCRIM = 8;
-const PUBKEY = 32;
+function parseBoolEnv(name: string, def = false): boolean {
+  const v = (process.env[name] ?? "").trim().toLowerCase();
+  if (!v) return def;
+  return v === "1" || v === "true" || v === "yes" || v === "y";
+}
 
-// These are the ONLY things likely to need adjustment:
-const FIELD_INDEX = {
-  // pubkey fields (0-based within the pubkey list AFTER discriminator)
-  baseVault: 7,  // <-- if wrong, change
-  quoteVault: 8, // <-- if wrong, change
-  lpMint: 12,    // <-- matches your frontend code
-};
+function clampInt(n: number, min: number, max: number): number {
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
 
-// Non-pubkey scalar offsets (best-effort).
-// These vary a lot by struct layout; we’ll parse only if the offset is known.
-// If you *know* exact offsets for these in your Rust struct, set them here.
-const SCALAR_OFFSETS: Partial<Record<keyof DexPoolRow, number>> = {
-  // Example placeholders (likely wrong unless you confirm the layout)
-  // base_fee_bps: <byte_offset>,
-  // bin_step_bps: <byte_offset>,
-  // paused_bits: <byte_offset>,
-  // active_bin: <byte_offset>,
-  // initial_bin: <byte_offset>,
-};
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
-// ---- helpers ----
-function isLikelyPubkey(s: string | null | undefined): boolean {
-  if (!s) return false;
-  if (s.length < 32 || s.length > 60) return false;
-  try {
-    // will throw if invalid
-    new PublicKey(s);
-    return true;
-  } catch {
-    return false;
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function pickUnknown(obj: unknown, keys: string[]): unknown {
+  if (!isRecord(obj)) return undefined;
+  for (const k of keys) {
+    if (k in obj) {
+      const val = obj[k];
+      if (val != null) return val;
+    }
   }
+  return undefined;
 }
 
-function readPubkeyAt(data: Buffer, pubkeyFieldIndex: number): string | null {
-  const offset = DISCRIM + pubkeyFieldIndex * PUBKEY;
-  if (offset + PUBKEY > data.length) return null;
-  const bytes = data.subarray(offset, offset + PUBKEY);
-  try {
-    return new PublicKey(bytes).toBase58();
-  } catch {
-    return null;
+function asPk(x: unknown, label: string): PublicKey {
+  if (x instanceof PublicKey) return x;
+  if (typeof x === "string") return new PublicKey(x);
+  if (x instanceof Uint8Array) return new PublicKey(x);
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(x)) return new PublicKey(x);
+  throw new Error(`${label}_invalid_pubkey`);
+}
+
+function asNumberI32(x: unknown, label: string): number {
+  if (x == null) throw new Error(`${label}_missing`);
+
+  if (typeof x === "number" && Number.isFinite(x)) return Math.trunc(x);
+  if (typeof x === "bigint") return Number(x);
+
+  if (typeof x === "string") {
+    const n = Number(x);
+    if (Number.isFinite(n)) return Math.trunc(n);
   }
+
+  if (isRecord(x) && typeof x.toString === "function") {
+    const n = Number((x as { toString: () => string }).toString());
+    if (Number.isFinite(n)) return Math.trunc(n);
+  }
+
+  throw new Error(`${label}_invalid_i32`);
 }
 
-function readU16LE(data: Buffer, offset: number): number | null {
-  if (offset + 2 > data.length) return null;
-  return data.readUInt16LE(offset);
+function asNumberU16(x: unknown, label: string): number {
+  const n = asNumberI32(x, label);
+  if (n < 0 || n > 65535) throw new Error(`${label}_invalid_u16`);
+  return n;
 }
 
-function readI32LE(data: Buffer, offset: number): number | null {
-  if (offset + 4 > data.length) return null;
-  return data.readInt32LE(offset);
+function asNumberU32(x: unknown, label: string): number {
+  const n = asNumberI32(x, label);
+  if (n < 0 || n > 4294967295) throw new Error(`${label}_invalid_u32`);
+  return n;
 }
 
-function readU32LE(data: Buffer, offset: number): number | null {
-  if (offset + 4 > data.length) return null;
-  return data.readUInt32LE(offset);
+function setPatch<K extends keyof DexPoolRow>(obj: Partial<DexPoolRow>, key: K, val: DexPoolRow[K]) {
+  obj[key] = val;
 }
 
 function onlyNullUpdates(row: DexPoolRow, patch: Partial<DexPoolRow>): Partial<DexPoolRow> {
   const out: Partial<DexPoolRow> = {};
-  for (const [k, v] of Object.entries(patch) as [keyof DexPoolRow, any][]) {
+
+  const entries = Object.entries(patch) as Array<
+    [keyof DexPoolRow, DexPoolRow[keyof DexPoolRow] | undefined]
+  >;
+
+  for (const [k, v] of entries) {
     if (v == null) continue;
+
     const cur = row[k];
+
     const isEmpty =
       cur == null ||
       (typeof cur === "string" && cur.trim() === "") ||
       (typeof cur === "number" && !Number.isFinite(cur));
-    if (isEmpty) out[k] = v;
+
+    if (isEmpty) {
+      // TS needs help to relate k -> value type
+      setPatch(out, k, v as DexPoolRow[typeof k]);
+    }
   }
+
   return out;
 }
 
@@ -118,11 +140,60 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-// ---- main ----
+/**
+ * Decode Pool account using your IDL coder (same as readPool()).
+ * Returns a DB patch with fields you want to backfill.
+ */
+function decodePoolToPatch(data: Buffer): Partial<DexPoolRow> | null {
+  const raw: unknown = decodeAccount("Pool", data);
+  if (!raw) return null;
+
+  try {
+    const baseVaultPk = asPk(pickUnknown(raw, ["baseVault", "base_vault"]), "base_vault");
+    const quoteVaultPk = asPk(pickUnknown(raw, ["quoteVault", "quote_vault"]), "quote_vault");
+
+    // lp mint might be named differently depending on your struct/IDL
+    const lpMintVal = pickUnknown(raw, ["lpMint", "lp_mint", "lpTokenMint", "lp_token_mint"]);
+    const lpMintPk = lpMintVal != null ? asPk(lpMintVal, "lp_mint") : null;
+
+    const activeBin = asNumberI32(pickUnknown(raw, ["activeBin", "active_bin"]), "active_bin");
+
+    // your pool_reader uses initialBinId / initial_bin_id
+    const initialBin = asNumberI32(
+      pickUnknown(raw, ["initialBinId", "initial_bin_id", "initialBin", "initial_bin"]),
+      "initial_bin_id"
+    );
+
+    // your pool_reader uses pauseBits/binStepBps/baseFeeBps (and snake-case fallbacks)
+    const pausedBits = asNumberU32(pickUnknown(raw, ["pauseBits", "pause_bits"]) ?? 0, "pause_bits");
+    const binStepBps = asNumberU16(pickUnknown(raw, ["binStepBps", "bin_step_bps"]) ?? 0, "bin_step_bps");
+    const baseFeeBps = asNumberU16(pickUnknown(raw, ["baseFeeBps", "base_fee_bps"]) ?? 0, "base_fee_bps");
+
+    return {
+      base_vault: baseVaultPk.toBase58(),
+      quote_vault: quoteVaultPk.toBase58(),
+      lp_mint: lpMintPk ? lpMintPk.toBase58() : null,
+
+      active_bin: activeBin,
+      initial_bin: initialBin,
+
+      paused_bits: pausedBits,
+      bin_step_bps: binStepBps,
+      base_fee_bps: baseFeeBps,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const SUPABASE_URL = mustEnv("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
   const SOLANA_RPC_URL = mustEnv("SOLANA_RPC_URL");
+
+  const BATCH = clampInt(Number(process.env.POOL_BACKFILL_BATCH ?? 50), 1, 250);
+  const DELAY_MS = clampInt(Number(process.env.POOL_BACKFILL_DELAY_MS ?? 150), 0, 5000);
+  const DRY_RUN = parseBoolEnv("POOL_BACKFILL_DRY_RUN", false);
 
   const supa = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
@@ -134,9 +205,10 @@ async function main() {
     confirmTransactionInitialTimeout: 10_000,
   });
 
-  console.log("[pool_backfill] rpc=", SOLANA_RPC_URL);
-  console.log("[pool_backfill] batch=", BATCH);
-  console.log("[pool_backfill] fieldIndex=", FIELD_INDEX);
+  console.log("[pool_backfill] rpc =", SOLANA_RPC_URL);
+  console.log("[pool_backfill] batch =", BATCH);
+  console.log("[pool_backfill] delay_ms =", DELAY_MS);
+  console.log("[pool_backfill] dry_run =", DRY_RUN);
 
   // 1) load pools
   const { data: pools, error } = await supa
@@ -164,28 +236,32 @@ async function main() {
 
   if (error) throw new Error(`[pool_backfill] select dex_pools failed: ${error.message}`);
   const rows = (pools ?? []) as unknown as DexPoolRow[];
-  console.log("[pool_backfill] dex_pools rows=", rows.length);
+  console.log("[pool_backfill] dex_pools rows =", rows.length);
   if (!rows.length) return;
 
-  // 2) fetch on-chain in batches
+  const byPool = new Map<string, DexPoolRow>();
+  for (const r of rows) byPool.set(r.pool, r);
+
+  // 2) fetch on-chain accounts in batches
   const poolKeys = rows.map((r) => new PublicKey(r.pool));
   const batches = chunk(poolKeys, BATCH);
 
   let updated = 0;
   let skipped = 0;
   let missingAcc = 0;
+  let decodeFailed = 0;
 
   for (let bi = 0; bi < batches.length; bi++) {
     const b = batches[bi]!;
     const infos = await conn.getMultipleAccountsInfo(b, "processed");
 
-    // 3) parse + build updates
-    const updates: Array<{ pool: string } & Partial<DexPoolRow>> = [];
+    const updates: Array<{ pool: string; patch: Partial<DexPoolRow> }> = [];
 
     for (let i = 0; i < b.length; i++) {
       const poolPk = b[i]!.toBase58();
+      const row = byPool.get(poolPk);
       const info = infos[i];
-      const row = rows.find((r) => r.pool === poolPk);
+
       if (!row) continue;
 
       if (!info?.data) {
@@ -193,87 +269,52 @@ async function main() {
         continue;
       }
 
-      const data = Buffer.from(info.data);
+      const patch = decodePoolToPatch(Buffer.from(info.data));
+      if (!patch) {
+        decodeFailed++;
+        continue;
+      }
 
-      const baseVault = readPubkeyAt(data, FIELD_INDEX.baseVault);
-      const quoteVault = readPubkeyAt(data, FIELD_INDEX.quoteVault);
-      const lpMint = readPubkeyAt(data, FIELD_INDEX.lpMint);
-
-      // Scalars (optional; only if offsets configured)
-      const base_fee_bps =
-        SCALAR_OFFSETS.base_fee_bps != null ? readU16LE(data, SCALAR_OFFSETS.base_fee_bps) : null;
-
-      const bin_step_bps =
-        SCALAR_OFFSETS.bin_step_bps != null ? readU16LE(data, SCALAR_OFFSETS.bin_step_bps) : null;
-
-      const paused_bits =
-        SCALAR_OFFSETS.paused_bits != null
-          ? readU32LE(data, SCALAR_OFFSETS.paused_bits)
-          : null;
-
-      const active_bin =
-        SCALAR_OFFSETS.active_bin != null ? readI32LE(data, SCALAR_OFFSETS.active_bin) : null;
-
-      const initial_bin =
-        SCALAR_OFFSETS.initial_bin != null ? readI32LE(data, SCALAR_OFFSETS.initial_bin) : null;
-
-      // sanity: don’t write garbage pubkeys
-      const patch: Partial<DexPoolRow> = {
-        base_vault: isLikelyPubkey(baseVault) ? baseVault : null,
-        quote_vault: isLikelyPubkey(quoteVault) ? quoteVault : null,
-        lp_mint: isLikelyPubkey(lpMint) ? lpMint : null,
-
-        // only if present & sane
-        base_fee_bps: base_fee_bps != null ? base_fee_bps : null,
-        bin_step_bps: bin_step_bps != null ? bin_step_bps : null,
-        paused_bits: paused_bits != null ? paused_bits : null,
-        active_bin: active_bin != null ? active_bin : null,
-        initial_bin: initial_bin != null ? initial_bin : null,
-      };
-
-      const safeUpdate = onlyNullUpdates(row, patch);
-
-      if (Object.keys(safeUpdate).length === 0) {
+      const safePatch = onlyNullUpdates(row, patch);
+      if (Object.keys(safePatch).length === 0) {
         skipped++;
         continue;
       }
 
-      updates.push({ pool: poolPk, ...safeUpdate });
+      updates.push({ pool: poolPk, patch: safePatch });
     }
 
-    // 4) write updates (upsert)
-    if (updates.length) {
-    for (const u of updates) {
-    const { pool, ...patch } = u;
-
-    const { error: updErr } = await supa
-        .from("dex_pools")
-        .update(patch)
-        .eq("pool", pool);
-
-    if (updErr) {
-        throw new Error(
-        `[pool_backfill] update failed for pool ${pool}: ${updErr.message}`
-        );
-    }
-    }
-
-      updated += updates.length;
-      console.log(`[pool_backfill] batch ${bi + 1}/${batches.length}: updated=${updates.length}`);
-    } else {
+    if (!updates.length) {
       console.log(`[pool_backfill] batch ${bi + 1}/${batches.length}: no updates`);
+      if (DELAY_MS) await sleep(DELAY_MS);
+      continue;
     }
+
+    if (DRY_RUN) {
+      console.log(`[pool_backfill] batch ${bi + 1}/${batches.length}: DRY_RUN would_update=${updates.length}`);
+      if (DELAY_MS) await sleep(DELAY_MS);
+      continue;
+    }
+
+    // robust update: one-by-one
+    for (const u of updates) {
+      const { error: updErr } = await supa.from("dex_pools").update(u.patch).eq("pool", u.pool);
+      if (updErr) throw new Error(`[pool_backfill] update failed for pool ${u.pool}: ${updErr.message}`);
+    }
+
+    updated += updates.length;
+    console.log(`[pool_backfill] batch ${bi + 1}/${batches.length}: updated=${updates.length}`);
+
+    if (DELAY_MS) await sleep(DELAY_MS);
   }
 
-  console.log("[pool_backfill] done", {
-    updated,
-    skipped,
-    missingAcc,
-  });
+  console.log("[pool_backfill] done", { updated, skipped, missingAcc, decodeFailed, dryRun: DRY_RUN });
 
-  console.log(
-    "[pool_backfill] NOTE: if base_vault/quote_vault look wrong, adjust FIELD_INDEX.baseVault / quoteVault and rerun (safe)."
-  );
+  if (decodeFailed > 0) {
+    console.log(
+      "[pool_backfill] NOTE: decodeFailed > 0 usually means account isn't a Pool account, or decodeAccount('Pool') layout mismatch."
+    );
+  }
 }
 
 main().catch((e) => {

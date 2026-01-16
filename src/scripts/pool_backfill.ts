@@ -2,7 +2,7 @@ import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 import { Connection, PublicKey } from "@solana/web3.js";
 
-import { decodeAccount } from "../idl/coder.js"; // <-- same as pool_reader.js
+import { decodeAccount } from "../idl/coder.js";
 
 type DexPoolRow = {
   pool: string;

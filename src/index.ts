@@ -16,8 +16,8 @@ import { createWsHub } from "./services/ws.js";
 import { startProgramLogStream } from "./services/program_ws.js";
 import { createVolumeStore, ingestFromTradeStore, startVolumeAggregator } from "./services/volume_aggregator.js";
 import { createCandleStore, ingestCandlesFromTradeStore, startCandleAggregator } from "./services/candle_aggregator.js";
-
 import { createStreamflowStakeStore, startStreamflowStakingAggregator } from "./services/streamflow_staking_indexer.js";
+import { createFeesStore, initFeesFromDb, startFeesAggregator } from "./services/fees_aggregator.js";
 
 /**
  * Logger
@@ -72,6 +72,9 @@ app.decorate("volumeStore", createVolumeStore());
 app.decorate("candleStore", createCandleStore());
 app.decorate("stakeStore", createStreamflowStakeStore());
 
+// ✅ fees store available to routes if needed later
+app.decorate("feesStore", createFeesStore());
+
 /**
  * poolsList is the canonical list used by:
  * - /api/v1/dex
@@ -88,7 +91,7 @@ app.decorate("poolsList", [...poolsFromEnv]);
 await app.register(v1Routes, { prefix: "/api/v1" });
 
 /**
- * CRITICAL INVARIANT: TODO
+ * CRITICAL INVARIANT:
  * The /dex endpoint returns app.poolsList (discovered pools).
  * The /pools endpoint uses listIndexedPools(app.tradeStore) which is based on tradeStore.byPool keys.
  *
@@ -147,6 +150,9 @@ if (app.poolsList.length === 0) {
 }
 seedPoolsIntoTradeStore(app.poolsList);
 
+// init fees cache from DB (vault addresses + any prior balances)
+await initFeesFromDb(app.feesStore, app.poolsList);
+
 /**
  * One-time historic backfill
  */
@@ -179,6 +185,16 @@ const candleAgg = startCandleAggregator({
   pools: app.poolsList,
 });
 
+// fees aggregator: when new swaps appear in tradeStore, refresh fee vault balances + write to dex_pools
+const feesAgg = startFeesAggregator({
+  tradeStore: app.tradeStore,
+  feesStore: app.feesStore,
+  pools: app.poolsList,
+  tickMs: 250,
+  debounceMs: 500,
+  minIntervalMs: 1000,
+});
+
 /**
  * Start WebSocket program log stream
  */
@@ -207,10 +223,11 @@ const shutdown = async (signal: string) => {
   indexer.stop();
   volumeAgg.stop();
   candleAgg.stop();
+  feesAgg.stop();
 
   await streamflowAgg.stop().catch(() => {});
-
   await programStream.stop().catch(() => {});
+
   try {
     await app.close();
   } finally {

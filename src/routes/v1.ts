@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
 import { env, HTTP_BASE, poolsFromEnv } from "../config.js";
-import { readBins, readPool } from "../services/pool_reader.js";
+import { readBins } from "../services/pool_reader.js";
 import { getTrades, listIndexedPools } from "../services/trades_indexer.js";
 import { readAsset } from "../services/assets.js";
 import { readPair } from "../services/pairs.js";
@@ -197,7 +197,8 @@ export async function v1Routes(app: FastifyInstance) {
 
     // pull DB rows
     const rows = await dbListPools(pools);
-    const out = rows.map((r) => ({
+
+    const out = rows.map((r: any) => ({
       id: r.pool,
       programId: r.program_id ?? "",
 
@@ -211,14 +212,18 @@ export async function v1Routes(app: FastifyInstance) {
       baseVault: r.base_vault ?? "",
       quoteVault: r.quote_vault ?? "",
 
-      creatorFeeVault: null,
-      holdersFeeVault: null,
-      nftFeeVault: null,
+      creatorFeeVault: r.creator_fee_vault ?? null,
+      holdersFeeVault: r.holders_fee_vault ?? null,
+      nftFeeVault: r.nft_fee_vault ?? null,
+      creatorFeeUi: num(r.creator_fee_ui),
+      holdersFeeUi: num(r.holders_fee_ui),
+      nftFeeUi: num(r.nft_fee_ui),
+      feesUpdatedAt: r.fees_updated_at ?? null,
 
       activeBin: r.active_bin ?? 0,
       initialBin: r.initial_bin ?? 0,
 
-      admin: "",
+      admin: r.admin ?? "",
       pausedBits: r.paused_bits ?? 0,
       binStepBps: r.bin_step_bps ?? 0,
       baseFeeBps: r.base_fee_bps ?? 0,
@@ -297,8 +302,6 @@ export async function v1Routes(app: FastifyInstance) {
   });
 
   // GET /api/v1/volumes?tf=24h&pools=pool1,pool2
-  // - If pools omitted -> active pools
-  // - Returns per-pool volumes for the requested tf (default 24h) + ts
   app.get("/volumes", async (req) => {
     const q = z
       .object({
@@ -317,7 +320,6 @@ export async function v1Routes(app: FastifyInstance) {
       const notAllowed = assertPoolAllowed(pool);
       if (notAllowed) continue;
 
-      // returns { "1m":..., "5m":..., ... "24h":..., "1d":... }
       const all = getPoolVolumesAll(app.volumeStore, pool as any);
       out[pool] = all[tf as keyof typeof all] ?? 0;
     }
@@ -343,7 +345,6 @@ export async function v1Routes(app: FastifyInstance) {
   });
 
   // GET /api/v1/candles-bundle/:pool?limit=500
-  // Returns current candle for all TFs.
   app.get("/candles-bundle/:pool", async (req) => {
     const params = z.object({ pool: z.string().min(32) }).parse(req.params);
     const q = z
@@ -370,4 +371,3 @@ export async function v1Routes(app: FastifyInstance) {
     return { owner: params.owner, rows, ts: Date.now() };
   });
 }
-

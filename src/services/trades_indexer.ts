@@ -291,6 +291,7 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
     }
 
     pushTrade(store, trade); // pushTrade marks seen for sig:pool
+    ;(globalThis as any).__onOrbitTrade?.(trade);
   }
 
 /**

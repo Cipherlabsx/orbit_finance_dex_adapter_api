@@ -11,6 +11,7 @@ import { verifyWsTicket, mintWsTicket } from "../services/ws_auth.js";
 import { getPoolVolumesAll } from "../services/volume_aggregator.js";
 import { getCandles, getCandlesBundle } from "../services/candle_aggregator.js";
 import { getOwnerStreamflowStakes, listStreamflowVaults } from "../services/streamflow_staking_indexer.js";
+import { dbListPools, dbGetPool } from "../services/pool_db.js";
 
 /**
  * Small helper: choose pool set.
@@ -198,7 +199,9 @@ export async function v1Routes(app: FastifyInstance) {
     const notAllowed = assertPoolAllowed(params.pool);
     if (notAllowed) return notAllowed;
 
-    return await readPool(params.pool);
+    const row = await dbGetPool(params.pool);
+    if (!row) return { error: "pool_not_found", pool: params.pool };
+    return row;
   });
 
   app.get("/bins/:pool", async (req) => {

@@ -164,26 +164,22 @@ export async function readEventsBySlotRange(
   const { data, error } = await supabaseAdmin
     .from("dex_events")
     .select("signature,slot,block_time,event_type,txn_index,event_index,event_data")
+    .eq("event_type", "swap")
     .gte("slot", fromSlot)
     .lte("slot", toSlot)
     .order("slot", { ascending: true })
     .order("txn_index", { ascending: true })
     .order("event_index", { ascending: true });
 
-  if (error) {
-    // For Gecko: avoid throwing; return empty (but you should log error at caller if needed).
-    return { events: [] };
-  }
+  if (error) return { events: [] };
 
   const rows = (data ?? []) as DexEventRow[];
   const events: StandardsSwapEvent[] = [];
 
   for (const row of rows) {
     const ev = rowToSwapEvent(row);
-    if (!ev) continue;
-    events.push(ev);
+    if (ev) events.push(ev);
   }
-
   return { events };
 }
 
@@ -195,29 +191,30 @@ export async function readEventsBySlotRange(
  * Fallback: if DB empty (fresh boot), return chain slot.
  */
 export async function readLatestBlock(): Promise<{ block: StandardsBlock }> {
+  // Must reflect the latest slot for which /events will return data.
+  // Since /events serves ONLY event_type='swap', latest-block must be based on that too.
   const { data, error } = await supabaseAdmin
     .from("dex_events")
-    .select("slot,block_time")
-    .not("slot", "is", null)
-    .order("slot", { ascending: false })
-    .limit(1);
+    .select("slot.max(), block_time.max()")
+    .eq("event_type", "swap")
+    .not("slot", "is", null);
 
-  if (!error && data && data.length > 0) {
-    const row = data[0] as { slot: number | null; block_time: number | null };
-    if (row.slot != null) {
-      return {
-        block: {
-          blockNumber: row.slot,
-          blockTimestamp: row.block_time ?? Math.floor(Date.now() / 1000),
-        },
-      };
-    }
+  const row = (data?.[0] ?? null) as { max?: number | null; max_1?: number | null } | null;
+  const maxSlot = row?.max ?? null;
+  const maxBlockTime = row?.max_1 ?? null;
+
+  if (!error && maxSlot != null) {
+    return {
+      block: {
+        blockNumber: maxSlot,
+        blockTimestamp: maxBlockTime ?? Math.floor(Date.now() / 1000),
+      },
+    };
   }
 
-  // Fallback if no persisted events yet
+  // Fallback if DB empty (fresh boot)
   const slot = await connection.getSlot("confirmed");
   const blockTime = await connection.getBlockTime(slot);
-
   return {
     block: {
       blockNumber: slot,

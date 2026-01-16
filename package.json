@@ -9,7 +9,9 @@
     "start": "node dist/index.js",
     "ws:ticket": "node tests/scripts/ws_ticket.mjs",
     "backfill:events": "tsx src/scripts/backfill_events.ts",
-    "backfill:streamflow": "tsx src/scripts/backfill_streamflow.ts"
+    "backfill:streamflow": "tsx src/scripts/backfill_streamflow.ts",
+    "backfill:pools": "tsx src/scripts/pool_backfill.ts",
+    "backfill:pools:liq": "tsx src/scripts/pool_liquidity_backfill.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
@@ -20,6 +22,7 @@
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
     "@supabase/supabase-js": "^2.90.1",
+    "autocannon": "^8.0.0",
     "bs58": "^6.0.0",
     "dotenv": "^17.2.3",
     "fastify": "^4.28.1",

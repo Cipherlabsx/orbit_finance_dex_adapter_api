@@ -53,6 +53,21 @@ function num(x: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+const TF_SEC: Record<string, number> = {
+  "1m": 60,
+  "5m": 5 * 60,
+  "15m": 15 * 60,
+  "30m": 30 * 60,
+  "1h": 60 * 60,
+  "4h": 4 * 60 * 60,
+  "1d": 24 * 60 * 60,
+};
+
+function floorToBucket(tsSec: number, tf: string): number {
+  const step = TF_SEC[tf] ?? 900;
+  return Math.floor(tsSec / step) * step;
+}
+
 export async function v1Routes(app: FastifyInstance) {
   await app.register(websocket);
 
@@ -358,36 +373,23 @@ export async function v1Routes(app: FastifyInstance) {
     return { tf, volumes: out, ts: Date.now() };
   });
 
-  // GET /api/v1/candles/:pool?tf=30m&limit=500
-  app.get("/candles/:pool", async (req) => {
+  // GET /api/v1/candles/:pool?tf=15m&limit=1500
+  app.get("/candles/:pool", async (req, reply) => {
     const params = z.object({ pool: z.string().min(32) }).parse(req.params);
     const q = z
       .object({
         tf: z.string().optional(),
-        limit: z.coerce.number().int().min(1).max(2000).default(500),
+        limit: z.coerce.number().int().min(1).max(1500).default(1500),
       })
       .parse((req.query ?? {}) as any);
 
     const notAllowed = assertPoolAllowed(params.pool);
     if (notAllowed) return notAllowed;
 
-    const tf = parseTf(q.tf, "30m");
+    const tf = parseTf(q.tf, "15m");
+
+    reply.header("cache-control", "no-store");
     return getCandles(app.candleStore, params.pool, tf as any, q.limit);
-  });
-
-  // GET /api/v1/candles-bundle/:pool?limit=500
-  app.get("/candles-bundle/:pool", async (req) => {
-    const params = z.object({ pool: z.string().min(32) }).parse(req.params);
-    const q = z
-      .object({
-        limit: z.coerce.number().int().min(1).max(2000).default(500),
-      })
-      .parse((req.query ?? {}) as any);
-
-    const notAllowed = assertPoolAllowed(params.pool);
-    if (notAllowed) return notAllowed;
-
-    return getCandlesBundle(app.candleStore, params.pool, q.limit);
   });
 
   // GET /api/v1/streamflow/vaults

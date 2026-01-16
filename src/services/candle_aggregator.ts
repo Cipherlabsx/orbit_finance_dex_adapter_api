@@ -15,6 +15,48 @@ const TF_SEC: Record<Timeframe, number> = {
   "1d": 24 * 60 * 60,
 };
 
+function gapFillCandlesAsc(
+  candlesAsc: PublicCandle[],
+  tf: Timeframe
+): PublicCandle[] {
+  const step = TF_SEC[tf];
+  if (candlesAsc.length === 0) return candlesAsc;
+
+  const out: PublicCandle[] = [];
+  let prev = candlesAsc[0]!;
+
+  // normalize first candle time to bucket boundary
+  const firstT = Math.floor(prev.time / step) * step;
+  prev = { ...prev, time: firstT };
+  out.push(prev);
+
+  for (let i = 1; i < candlesAsc.length; i++) {
+    const cur0 = candlesAsc[i]!;
+    const curT = Math.floor(cur0.time / step) * step;
+
+    // fill missing buckets with flat candles
+    let t = prev.time + step;
+    while (t < curT) {
+      out.push({
+        time: t,
+        open: prev.close,
+        high: prev.close,
+        low: prev.close,
+        close: prev.close,
+        volumeQuote: 0,
+        tradesCount: 0,
+      });
+      t += step;
+    }
+
+    const cur: PublicCandle = { ...cur0, time: curT };
+    out.push(cur);
+    prev = cur;
+  }
+
+  return out;
+}
+
 type PoolMeta = {
   baseMint: string;
   quoteMint: string;
@@ -263,11 +305,20 @@ function toPublic(c: Candle): PublicCandle {
  * In-memory only (current candle per TF).
  * If you want historical series, serve from DB or keep ring buffers.
  */
-export function getCandles(candleStore: CandleStore, pool: string, tf: Timeframe, limit = 500) {
+export async function getCandles(candleStore: CandleStore, pool: string, tf: Timeframe, limit = 500) {
+  // DB authoritative
+  const dbCandlesAsc = await readCandlesFromDb(pool, tf, limit);
+
+  if (dbCandlesAsc.length > 0) {
+    const filled = gapFillCandlesAsc(dbCandlesAsc, tf);
+    return { pool, tf, candles: filled, ts: Date.now(), source: "db" as const };
+  }
+
+  // fallback to in-memory if DB not available / empty
   const st = candleStore.byPool.get(pool);
   const cur = st?.cur.get(tf) ?? null;
   const candles = cur ? [toPublic(cur)] : [];
-  return { pool, tf, candles: candles.slice(0, limit), ts: Date.now() };
+  return { pool, tf, candles: candles.slice(0, limit), ts: Date.now(), source: "mem" as const };
 }
 
 export function getCandlesBundle(candleStore: CandleStore, pool: string, limit = 500) {
@@ -293,9 +344,7 @@ export function getCandlesBundle(candleStore: CandleStore, pool: string, limit =
   return { pool, tfs, ts: Date.now() };
 }
 
-// --------------------------
 // DB flush (indexer-only)
-// --------------------------
 
 let SUPA: any | null = null;
 
@@ -308,6 +357,39 @@ async function getSupa(): Promise<any | null> {
   const m = await import("@supabase/supabase-js");
   SUPA = m.createClient(url, key, { auth: { persistSession: false } });
   return SUPA;
+}
+
+async function readCandlesFromDb(pool: string, tf: Timeframe, limit: number): Promise<PublicCandle[]> {
+  const supa = await getSupa();
+  if (!supa) return [];
+
+  const { data, error } = await supa
+    .from("dex_pool_candles")
+    .select("bucket_start, open, high, low, close, volume_quote, trades_count")
+    .eq("pool", pool)
+    .eq("tf", tf)
+    .order("bucket_start", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    // eslint-disable-next-line no-console
+    console.error("[candles] db read failed:", error.message ?? error);
+    return [];
+  }
+
+  // ascending for chart + gap-fill
+  return (data ?? [])
+    .slice()
+    .reverse()
+    .map((r: any) => ({
+      time: Math.floor(new Date(r.bucket_start).getTime() / 1000),
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volumeQuote: Number(r.volume_quote ?? 0),
+      tradesCount: Number(r.trades_count ?? 0),
+    }));
 }
 
 type CandleRow = {
@@ -415,3 +497,4 @@ export function startCandleAggregator(opts: {
     },
   };
 }
+

@@ -48,6 +48,11 @@ function parsePoolsCsv(poolsRaw: unknown): string[] {
     .filter((s) => s.length >= 32);
 }
 
+function num(x: unknown): number {
+  const n = typeof x === "number" ? x : Number(x);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export async function v1Routes(app: FastifyInstance) {
   await app.register(websocket);
 
@@ -189,7 +194,39 @@ export async function v1Routes(app: FastifyInstance) {
 
   app.get("/pools", async () => {
     const pools = getActivePools(app);
-    const out = await Promise.all(pools.map((p) => readPool(p)));
+
+    // pull DB rows
+    const rows = await dbListPools(pools);
+    const out = rows.map((r) => ({
+      id: r.pool,
+      programId: r.program_id ?? "",
+
+      baseMint: r.base_mint ?? "",
+      quoteMint: r.quote_mint ?? "",
+
+      // safe defaults
+      priceQ6464: "0",
+      priceNumber: r.last_price_quote_per_base == null ? null : num(r.last_price_quote_per_base),
+
+      baseVault: r.base_vault ?? "",
+      quoteVault: r.quote_vault ?? "",
+
+      creatorFeeVault: null,
+      holdersFeeVault: null,
+      nftFeeVault: null,
+
+      activeBin: r.active_bin ?? 0,
+      initialBin: r.initial_bin ?? 0,
+
+      admin: "",
+      pausedBits: r.paused_bits ?? 0,
+      binStepBps: r.bin_step_bps ?? 0,
+      baseFeeBps: r.base_fee_bps ?? 0,
+
+      liquidityQuote: num(r.liquidity_quote),
+      tvlLockedQuote: num(r.tvl_locked_quote),
+    }));
+
     return { pools: out };
   });
 

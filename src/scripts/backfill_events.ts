@@ -153,6 +153,57 @@ async function loadPoolCached(cache: Map<string, PoolView>, pool: string): Promi
   }
 }
 
+/**
+ * Deterministic txnIndex:
+ * - For a given slot, fetch the block (signatures only) and map signature->index.
+ * - Cache per slot for speed.
+ */
+type TxnIndexCacheEntry = { ts: number; map: Map<string, number> };
+const TXN_INDEX_CACHE = new Map<number, TxnIndexCacheEntry>();
+const TXN_INDEX_TTL_MS = 60_000;
+
+async function getTxnIndexForSignature(connection: Connection, slot: number, sig: string): Promise<number> {
+  const now = Date.now();
+  const hit = TXN_INDEX_CACHE.get(slot);
+
+  if (hit && now - hit.ts < TXN_INDEX_TTL_MS) {
+    return hit.map.get(sig) ?? 0;
+  }
+
+  const map = new Map<string, number>();
+
+  try {
+    const block = await connection.getBlock(slot, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+      transactionDetails: "signatures",
+      rewards: false,
+    });
+
+    const sigs: string[] = [];
+    const anyBlock = block as any;
+
+    // Some RPCs return `signatures: string[]`
+    if (Array.isArray(anyBlock?.signatures)) {
+      for (const s of anyBlock.signatures) if (typeof s === "string") sigs.push(s);
+    }
+    // Others return `transactions: [{ transaction: { signatures: string[] } }]`
+    else if (Array.isArray(anyBlock?.transactions)) {
+      for (const t of anyBlock.transactions) {
+        const s0 = t?.transaction?.signatures?.[0];
+        if (typeof s0 === "string") sigs.push(s0);
+      }
+    }
+
+    for (let i = 0; i < sigs.length; i++) map.set(sigs[i]!, i);
+  } catch {
+    // ignore; fallback txnIndex=0
+  }
+
+  TXN_INDEX_CACHE.set(slot, { ts: now, map });
+  return map.get(sig) ?? 0;
+}
+
 async function processSignature(params: {
   connection: Connection;
   programIdStr: string;
@@ -179,10 +230,13 @@ async function processSignature(params: {
   const slot = typeof tx.slot === "number" ? tx.slot : null;
   const blockTime = typeof tx.blockTime === "number" ? tx.blockTime : null;
 
+  // Deterministic per-slot ordering
+  const txnIndex = slot != null ? await getTxnIndexForSignature(connection, slot, signature) : 0;
+
   const logs = toLogs(tx);
   const decoded = decodeEventsFromLogs(logs);
 
-  // 1) Always write "events" row(s)
+  // 1) Always write events row(s)
   if (decoded.length === 0) {
     await writeDexEvent({
       signature,
@@ -190,6 +244,7 @@ async function processSignature(params: {
       blockTime,
       programId: programIdStr,
       eventType: "tx",
+      txnIndex,
       eventIndex: 0,
       eventData: null,
       logs,
@@ -203,6 +258,7 @@ async function processSignature(params: {
         blockTime,
         programId: programIdStr,
         eventType: evt.name,
+        txnIndex,
         eventIndex: i,
         eventData: safeEventData(evt.data),
         logs,
@@ -212,12 +268,12 @@ async function processSignature(params: {
 
   const wroteEvents = decoded.length === 0 ? 1 : decoded.length;
 
-  // Try to materialize swaps -> dex_trades
+  // 2) Materialize swaps -> dex_trades
   // Prefer pool discovery from event data (best)
   const poolsFromEvents = uniqStrings(decoded.flatMap(eventCandidatePools));
   const pools: string[] = [...poolsFromEvents];
 
-  // Fallback pool discovery: scan some tx accounts and probe readPool()
+  // Fallback discovery: scan some tx accounts and probe readPool()
   if (pools.length === 0) {
     const keys = getAccountKeys(tx);
     const max = Math.min(keys.length, opts.scanAccountsMax);

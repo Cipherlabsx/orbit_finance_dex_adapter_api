@@ -13,7 +13,7 @@ import { connection, pk, PROGRAM_ID } from "../solana.js";
 import { env } from "../config.js";
 import { readPool } from "./pool_reader.js";
 import { deriveTradeFromTransaction } from "./trade_derivation.js";
-import { updateDexPoolLiveState } from "../supabase.js"; // ✅ NEW
+import { updateDexPoolLiveState } from "../supabase.js";
 
 export type Trade = {
   signature: string;
@@ -80,8 +80,8 @@ function detectSwapFromLogs(logs: readonly string[] | null | undefined): boolean
 
   for (const l of logs) {
     const s = l.toLowerCase();
-    if (s.includes("swapexecuted")) return true; // anchor event name (if emitted)
-    if (s.includes("instruction: swap")) return true; // anchor log
+    if (s.includes("swapexecuted")) return true;
+    if (s.includes("instruction: swap")) return true;
     if (s.includes(`instruction: ${SWAP_IX_NAME}`)) return true;
   }
   return false;
@@ -89,11 +89,10 @@ function detectSwapFromLogs(logs: readonly string[] | null | undefined): boolean
 
 /**
  * Instruction shapes we may see from getTransaction() JSON response.
- * Only need `programIdIndex` + `data` in compiled form.
  */
 type CompiledInstructionLike = {
   programIdIndex: number;
-  data: string; // base58 or base64 depending on RPC, we support both
+  data: string;
 };
 
 type LegacyInstructionLike = {
@@ -102,19 +101,15 @@ type LegacyInstructionLike = {
 };
 
 /**
- * Robust swap detection by scanning instructions:
- * - programId == PROGRAM_ID
- * - data starts with Anchor discriminator for `swap`
+ * Robust swap detection by scanning instructions
  */
 function detectSwapFromInstructions(tx: VersionedTransactionResponse): boolean {
   try {
     const msg = tx.transaction.message;
 
-    // Legacy message has `instructions`
     const legacyIxs: LegacyInstructionLike[] =
       isLegacyMessage(msg) ? (msg.instructions as LegacyInstructionLike[]) : [];
 
-    // v0 message has `compiledInstructions`
     const v0Ixs: CompiledInstructionLike[] =
       isV0Message(msg) ? (msg.compiledInstructions as unknown as CompiledInstructionLike[]) : [];
 
@@ -125,24 +120,18 @@ function detectSwapFromInstructions(tx: VersionedTransactionResponse): boolean {
       return keyToString(k);
     };
 
-    // Legacy-style instructions
     for (const ix of legacyIxs) {
       const pid = keyToString(ix.programId ?? null);
-      if (!pid) continue;
       if (pid !== PROGRAM_ID.toBase58()) continue;
-
       const disc = readDiscriminatorFromAnyData(ix.data);
-      if (disc && disc.equals(SWAP_DISCRIM)) return true;
+      if (disc?.equals(SWAP_DISCRIM)) return true;
     }
 
-    // V0 compiled instructions
     for (const ix of v0Ixs) {
       const pid = resolveProgramId(Number(ix.programIdIndex));
-      if (!pid) continue;
       if (pid !== PROGRAM_ID.toBase58()) continue;
-
       const disc = readDiscriminatorFromAnyData(ix.data);
-      if (disc && disc.equals(SWAP_DISCRIM)) return true;
+      if (disc?.equals(SWAP_DISCRIM)) return true;
     }
 
     return false;
@@ -156,21 +145,15 @@ function readDiscriminatorFromAnyData(
 ): Buffer | null {
   if (!data) return null;
 
-  if (Buffer.isBuffer(data)) return data.length >= 8 ? data.subarray(0, 8) : null;
-  if (data instanceof Uint8Array) return data.length >= 8 ? Buffer.from(data).subarray(0, 8) : null;
+  if (Buffer.isBuffer(data)) return data.subarray(0, 8);
+  if (data instanceof Uint8Array) return Buffer.from(data).subarray(0, 8);
 
-  // String: try base64 then base58
   if (typeof data === "string") {
-    // base64
     try {
-      const b64 = Buffer.from(data, "base64");
-      if (b64.length >= 8) return b64.subarray(0, 8);
+      return Buffer.from(data, "base64").subarray(0, 8);
     } catch {}
-
-    // base58
     try {
-      const b58 = Buffer.from(bs58.decode(data));
-      if (b58.length >= 8) return b58.subarray(0, 8);
+      return Buffer.from(bs58.decode(data)).subarray(0, 8);
     } catch {}
   }
 
@@ -197,15 +180,13 @@ function isLegacyMessage(msg: VersionedMessage): msg is Message {
 function getAllAccountKeys(tx: VersionedTransactionResponse): AccountKeyLike[] {
   const msg = tx.transaction.message;
 
-  // Legacy message: accountKeys exists
   if (isLegacyMessage(msg)) {
     return msg.accountKeys as AccountKeyLike[];
   }
 
-  // v0 message: staticAccountKeys + loaded addresses
   const staticKeys = msg.staticAccountKeys as PublicKey[];
-  const loadedWritable = (tx.meta?.loadedAddresses?.writable ?? []) as PublicKey[];
-  const loadedReadonly = (tx.meta?.loadedAddresses?.readonly ?? []) as PublicKey[];
+  const loadedWritable = tx.meta?.loadedAddresses?.writable ?? [];
+  const loadedReadonly = tx.meta?.loadedAddresses?.readonly ?? [];
 
   return [...staticKeys, ...loadedWritable, ...loadedReadonly];
 }
@@ -238,6 +219,50 @@ async function getPoolMini(pool: string): Promise<PoolMini> {
   return v;
 }
 
+// helpers
+
+function atomsToUi(atoms: string, decimals: number): number {
+  return Number(BigInt(atoms)) / 10 ** decimals;
+}
+
+function computeTradePriceQuotePerBase(args: {
+  inMint: string | null;
+  outMint: string | null;
+  amountIn: string | null;
+  amountOut: string | null;
+  baseMint: string;
+  quoteMint: string;
+  baseDecimals: number;
+  quoteDecimals: number;
+}): number | null {
+  const {
+    inMint,
+    outMint,
+    amountIn,
+    amountOut,
+    baseMint,
+    quoteMint,
+    baseDecimals,
+    quoteDecimals,
+  } = args;
+
+  if (!inMint || !outMint || !amountIn || !amountOut) return null;
+
+  if (inMint === baseMint && outMint === quoteMint) {
+    const base = atomsToUi(amountIn, baseDecimals);
+    const quote = atomsToUi(amountOut, quoteDecimals);
+    return base > 0 ? quote / base : null;
+  }
+
+  if (inMint === quoteMint && outMint === baseMint) {
+    const quote = atomsToUi(amountIn, quoteDecimals);
+    const base = atomsToUi(amountOut, baseDecimals);
+    return base > 0 ? quote / base : null;
+  }
+
+  return null;
+}
+
 async function processSignatureForPool(store: TradeStore, pool: string, sig: string) {
   const seenKey = `${sig}:${pool}`;
   if (store.seen.has(seenKey)) return;
@@ -249,20 +274,15 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
       commitment: "confirmed",
     });
   } catch {
-    // DON'T mark seen, RPC can fail retry later
     return;
   }
 
-  if (!tx) {
-    // DON'T mark seen, tx might be temporarily unavailable
-    return;
-  }
+  if (!tx) return;
 
   const logs = tx.meta?.logMessages ?? null;
   const isSwap = detectSwapFromLogs(logs) || detectSwapFromInstructions(tx);
 
   if (!isSwap) {
-    // definitive "not a swap" -> safe to mark seen
     store.seen.add(seenKey);
     return;
   }
@@ -271,7 +291,6 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
   try {
     poolMini = await getPoolMini(pool);
   } catch {
-    // DON'T mark seen, retry later
     return;
   }
 
@@ -285,27 +304,41 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
 
   if (!trade) return;
 
-  pushTrade(store, trade); // pushTrade marks seen for sig:pool
+  pushTrade(store, trade);
 
-  // ✅ NEW: after swap, pull on-chain pool state and upsert into dex_pools
+  // derive real executed price
   try {
     const pNow = await readPool(pool);
+
+    const tradePrice = computeTradePriceQuotePerBase({
+      inMint: trade.inMint,
+      outMint: trade.outMint,
+      amountIn: trade.amountIn,
+      amountOut: trade.amountOut,
+      baseMint: pNow.baseMint,
+      quoteMint: pNow.quoteMint,
+      baseDecimals: pNow.baseDecimals,
+      quoteDecimals: pNow.quoteDecimals,
+    });
+
+    if (tradePrice != null) {
+      console.log("[LIVE TRADE PRICE]", pool, trade.signature, tradePrice);
+    }
+
     await updateDexPoolLiveState({
       pool,
       activeBin: pNow.activeBin,
-      priceQuotePerBase: pNow.priceNumber ?? null,
+      priceQuotePerBase: tradePrice,
       slot: tx.slot,
       signature: trade.signature,
     });
-  } catch {
-    // don't break indexing if DB/RPC hiccups
-  }
+  } catch {}
 
-  ;(globalThis as any).__onOrbitTrade?.(trade);
+  (globalThis as any).__onOrbitTrade?.(trade);
 }
 
 /**
- * LIVE polling (recent signatures)
+ * LIVE polling
  */
 export async function pollTrades(store: TradeStore, pools: string[]) {
   const lookback = env.SIGNATURE_LOOKBACK;
@@ -327,19 +360,17 @@ export async function pollTrades(store: TradeStore, pools: string[]) {
 }
 
 /**
- * HISTORIC backfill (paginated)
- * - walks backwards using `before`
- * - stops after BACKFILL_MAX_SIGNATURES_PER_POOL
+ * HISTORIC backfill
  */
 export async function backfillTrades(store: TradeStore, pools: string[]) {
   const maxPerPool = env.BACKFILL_MAX_SIGNATURES_PER_POOL;
   const pageSize = Math.max(10, Math.min(1000, env.BACKFILL_PAGE_SIZE));
 
-  if (!Number.isFinite(maxPerPool) || maxPerPool <= 0) return;
+  if (maxPerPool <= 0) return;
 
   for (const pool of pools) {
     let fetched = 0;
-    let before: string | undefined = undefined;
+    let before: string | undefined;
 
     while (fetched < maxPerPool) {
       const limit = Math.min(pageSize, maxPerPool - fetched);
@@ -351,7 +382,7 @@ export async function backfillTrades(store: TradeStore, pools: string[]) {
         break;
       }
 
-      if (sigs.length === 0) break;
+      if (!sigs.length) break;
 
       fetched += sigs.length;
       before = sigs[sigs.length - 1]?.signature;
@@ -361,8 +392,6 @@ export async function backfillTrades(store: TradeStore, pools: string[]) {
         if (!sig) continue;
         await processSignatureForPool(store, pool, sig);
       }
-
-      if (sigs.length < limit) break;
     }
   }
 }
@@ -374,8 +403,6 @@ export function startTradeIndexer(store: TradeStore, pools: string[]) {
     if (stopped) return;
     try {
       await pollTrades(store, pools);
-    } catch {
-      // keep loop alive
     } finally {
       if (!stopped) setTimeout(tick, env.TRADES_POLL_MS);
     }

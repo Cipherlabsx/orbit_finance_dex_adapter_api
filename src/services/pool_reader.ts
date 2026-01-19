@@ -210,8 +210,7 @@ export async function readPool(pool: string): Promise<PoolView> {
   const priceVal = pick<any>(raw, ["priceQ6464", "priceQ64_64", "price_q64_64"]);
   const priceQ64 = BigInt(asU64String(priceVal, "price_q64_64"));
   const priceAtoms = safeNumber(priceQ64) === null ? null : Number(priceQ64) / 2 ** 64;
-
-  const activeBin = asNumberI32(pick(raw, ["activeBin", "active_bin"])!, "active_bin");
+  const activeBin = asNumberI32(pick(raw, ["activeBinId", "active_bin_id", "activeBin", "active_bin"])!, "active_bin");
   const initialBin = asNumberI32(pick(raw, ["initialBinId", "initial_bin_id"])!, "initial_bin_id");
   const pauseBits = asNumberI32(pick(raw, ["pauseBits", "pause_bits"]) ?? 0, "pause_bits");
   const binStepBps = asNumberI32(pick(raw, ["binStepBps", "bin_step_bps"]) ?? 0, "bin_step_bps");

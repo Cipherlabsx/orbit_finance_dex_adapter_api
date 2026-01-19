@@ -100,3 +100,30 @@ export async function dbGetPool(pool: string) {
   if (error) throw new Error(`dbGetPool failed: ${error.message}`);
   return (data ?? null) as DbPool | null;
 }
+
+export async function dbUpdatePoolLiveState(args: {
+  pool: string;
+  slot: number;
+  signature?: string | null;
+  activeBin: number | null;
+  lastPriceQuotePerBase: number | null;
+}) {
+  const { pool, slot, signature, activeBin, lastPriceQuotePerBase } = args;
+
+  // Only accept newer updates. Prevent out-of-order overwrites.
+  const gate = `last_update_slot.is.null,last_update_slot.lt.${slot}`;
+
+  const { error } = await supabase
+    .from("dex_pools")
+    .update({
+      active_bin: activeBin,
+      last_price_quote_per_base: lastPriceQuotePerBase,
+      last_update_slot: slot,
+      last_trade_sig: signature ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("pool", pool)
+    .or(gate);
+
+  if (error) throw new Error(`dbUpdatePoolLiveState failed: ${error.message}`);
+}

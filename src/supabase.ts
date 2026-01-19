@@ -132,3 +132,40 @@ export async function writeDexEvent(params: {
     "signature,event_index",
   ]);
 }
+
+export async function updateDexPoolLiveState(params: {
+  pool: string;
+  activeBin: number;
+  priceQuotePerBase: number | null;
+  slot: number;
+  signature: string;
+}) {
+  // Only accept updates that are newer than what DB currently has.
+  // We do it in 2 steps because PostgREST update filters are limited.
+  const { data: cur, error: readErr } = await supabase
+    .from("dex_pools")
+    .select("last_update_slot")
+    .eq("pool", params.pool)
+    .maybeSingle();
+
+  if (readErr) throw new Error(`updateDexPoolLiveState read failed: ${readErr.message}`);
+
+  const curSlot = (cur?.last_update_slot ?? null) as number | null;
+  if (curSlot != null && params.slot <= curSlot) {
+    // ignore older/out-of-order update
+    return;
+  }
+
+  const { error: updErr } = await supabase
+    .from("dex_pools")
+    .update({
+      active_bin: params.activeBin,
+      last_price_quote_per_base: params.priceQuotePerBase,
+      last_update_slot: params.slot,
+      last_trade_sig: params.signature,
+      updated_at: nowIso(),
+    })
+    .eq("pool", params.pool);
+
+  if (updErr) throw new Error(`updateDexPoolLiveState update failed: ${updErr.message}`);
+}

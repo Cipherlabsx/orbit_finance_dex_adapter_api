@@ -13,6 +13,7 @@ import { connection, pk, PROGRAM_ID } from "../solana.js";
 import { env } from "../config.js";
 import { readPool } from "./pool_reader.js";
 import { deriveTradeFromTransaction } from "./trade_derivation.js";
+import { updateDexPoolLiveState } from "../supabase.js"; // ✅ NEW
 
 export type Trade = {
   signature: string;
@@ -164,17 +165,13 @@ function readDiscriminatorFromAnyData(
     try {
       const b64 = Buffer.from(data, "base64");
       if (b64.length >= 8) return b64.subarray(0, 8);
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     // base58
     try {
       const b58 = Buffer.from(bs58.decode(data));
       if (b58.length >= 8) return b58.subarray(0, 8);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   return null;
@@ -245,54 +242,67 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
   const seenKey = `${sig}:${pool}`;
   if (store.seen.has(seenKey)) return;
 
-    let tx: VersionedTransactionResponse | null = null;
-    try {
-      tx = await connection.getTransaction(sig, {
-        maxSupportedTransactionVersion: 0,
-        commitment: "confirmed",
-      });
-    } catch {
-      // DON'T mark seen, RPC can fail retry later
-      return;
-    }
-
-    if (!tx) {
-      // DON'T mark seen, tx might be temporarily unavailable
-      return;
-    }
-
-    const logs = tx.meta?.logMessages ?? null;
-    const isSwap = detectSwapFromLogs(logs) || detectSwapFromInstructions(tx);
-
-    if (!isSwap) {
-      // definitive "not a swap" -> safe to mark seen
-      store.seen.add(seenKey);
-      return;
-    }
-
-    let poolMini: PoolMini;
-    try {
-      poolMini = await getPoolMini(pool);
-    } catch {
-      // DON'T mark seen, retry later
-      return;
-    }
-
-    const trade = deriveTradeFromTransaction(tx, {
-      pool,
-      baseVault: poolMini.baseVault,
-      quoteVault: poolMini.quoteVault,
-      baseMint: poolMini.baseMint,
-      quoteMint: poolMini.quoteMint,
+  let tx: VersionedTransactionResponse | null = null;
+  try {
+    tx = await connection.getTransaction(sig, {
+      maxSupportedTransactionVersion: 0,
+      commitment: "confirmed",
     });
-
-    if (!trade) {
-      return;
-    }
-
-    pushTrade(store, trade); // pushTrade marks seen for sig:pool
-    ;(globalThis as any).__onOrbitTrade?.(trade);
+  } catch {
+    // DON'T mark seen, RPC can fail retry later
+    return;
   }
+
+  if (!tx) {
+    // DON'T mark seen, tx might be temporarily unavailable
+    return;
+  }
+
+  const logs = tx.meta?.logMessages ?? null;
+  const isSwap = detectSwapFromLogs(logs) || detectSwapFromInstructions(tx);
+
+  if (!isSwap) {
+    // definitive "not a swap" -> safe to mark seen
+    store.seen.add(seenKey);
+    return;
+  }
+
+  let poolMini: PoolMini;
+  try {
+    poolMini = await getPoolMini(pool);
+  } catch {
+    // DON'T mark seen, retry later
+    return;
+  }
+
+  const trade = deriveTradeFromTransaction(tx, {
+    pool,
+    baseVault: poolMini.baseVault,
+    quoteVault: poolMini.quoteVault,
+    baseMint: poolMini.baseMint,
+    quoteMint: poolMini.quoteMint,
+  });
+
+  if (!trade) return;
+
+  pushTrade(store, trade); // pushTrade marks seen for sig:pool
+
+  // ✅ NEW: after swap, pull on-chain pool state and upsert into dex_pools
+  try {
+    const pNow = await readPool(pool);
+    await updateDexPoolLiveState({
+      pool,
+      activeBin: pNow.activeBin,
+      priceQuotePerBase: pNow.priceNumber ?? null,
+      slot: tx.slot,
+      signature: trade.signature,
+    });
+  } catch {
+    // don't break indexing if DB/RPC hiccups
+  }
+
+  ;(globalThis as any).__onOrbitTrade?.(trade);
+}
 
 /**
  * LIVE polling (recent signatures)

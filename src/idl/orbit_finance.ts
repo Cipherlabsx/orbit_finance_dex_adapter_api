@@ -1136,9 +1136,6 @@ export type OrbitFinance = {
     },
     {
       "name": "withdrawUser",
-      "docs": [
-        "User withdrawal: burns LP shares and returns pro-rata assets."
-      ],
       "discriminator": [
         86,
         169,
@@ -1454,171 +1451,176 @@ export type OrbitFinance = {
     },
     {
       "code": 6003,
+      "name": "missingBins",
+      "msg": "Missing liquidity bin accounts for withdrawal; pass all active bins in remaining_accounts."
+    },
+    {
+      "code": 6004,
       "name": "internalInconsistency",
       "msg": "Operation aborted due to an internal inconsistency."
     },
     {
-      "code": 6004,
+      "code": 6005,
       "name": "unknownError",
       "msg": "An unknown error has occurred."
     },
     {
-      "code": 6005,
+      "code": 6006,
       "name": "slippageExceeded",
       "msg": "The swap operation did not meet the minimum output requirements due to slippage protection."
     },
     {
-      "code": 6006,
+      "code": 6007,
       "name": "insufficientLiquidity",
       "msg": "The pool does not have sufficient liquidity to perform this operation."
     },
     {
-      "code": 6007,
+      "code": 6008,
       "name": "unauthorizedOperation",
       "msg": "Unauthorized operation attempted."
     },
     {
-      "code": 6008,
+      "code": 6009,
       "name": "invalidAuthority",
       "msg": "Invalid or missing protocol authority for this operation."
     },
     {
-      "code": 6009,
+      "code": 6010,
       "name": "invalidAccountState",
       "msg": "The account state is invalid."
     },
     {
-      "code": 6010,
+      "code": 6011,
       "name": "mintMismatch",
       "msg": "Token account mint does not match expected mint for this pool."
     },
     {
-      "code": 6011,
+      "code": 6012,
       "name": "ownerMismatch",
       "msg": "Token account owner does not match expected authority."
     },
     {
-      "code": 6012,
+      "code": 6013,
       "name": "tokenTransferFailed",
       "msg": "Token transfer failed to execute correctly."
     },
     {
-      "code": 6013,
+      "code": 6014,
       "name": "poolPaused",
       "msg": "Pool is currently paused."
     },
     {
-      "code": 6014,
+      "code": 6015,
       "name": "operationDisabled",
       "msg": "The requested operation is currently disabled."
     },
     {
-      "code": 6015,
+      "code": 6016,
       "name": "migrationFailed",
       "msg": "Migration failed for this pool account."
     },
     {
-      "code": 6016,
+      "code": 6017,
       "name": "versionMismatch",
       "msg": "On-chain version mismatch detected."
     },
     {
-      "code": 6017,
+      "code": 6018,
       "name": "poolAlreadyExists",
       "msg": "Pool already exists for this token pair and configuration."
     },
     {
-      "code": 6018,
+      "code": 6019,
       "name": "poolNotFound",
       "msg": "Pool not found for the requested token pair and configuration."
     },
     {
-      "code": 6019,
+      "code": 6020,
       "name": "pairOrderingViolation",
       "msg": "Invalid pair ordering; token pair must be canonicalized."
     },
     {
-      "code": 6020,
+      "code": 6021,
       "name": "registryViolation",
       "msg": "Pair registry constraint violated."
     },
     {
-      "code": 6021,
+      "code": 6022,
       "name": "binAlreadyExists",
       "msg": "Liquidity bin already exists for this index."
     },
     {
-      "code": 6022,
+      "code": 6023,
       "name": "binNotFound",
       "msg": "Liquidity bin not found for the requested index."
     },
     {
-      "code": 6023,
+      "code": 6024,
       "name": "invalidBinBounds",
       "msg": "Invalid liquidity bin bounds."
     },
     {
-      "code": 6024,
+      "code": 6025,
       "name": "lpTokenMismatch",
       "msg": "LP token mint or account does not match this pool."
     },
     {
-      "code": 6025,
+      "code": 6026,
       "name": "notEnoughShares",
       "msg": "Not enough LP shares to complete this operation."
     },
     {
-      "code": 6026,
+      "code": 6027,
       "name": "lpVaultMismatch",
       "msg": "LP vault or escrow does not match expected authority."
     },
     {
-      "code": 6027,
+      "code": 6028,
       "name": "reentrancyDetected",
       "msg": "Reentrancy detected: operation aborted for security reasons."
     },
     {
-      "code": 6028,
+      "code": 6029,
       "name": "priceOutOfRange",
       "msg": "Initial deposit price deviates from target"
     },
     {
-      "code": 6029,
+      "code": 6030,
       "name": "poolNotEmpty",
       "msg": "Pool reserves must be empty on bootstrap"
     },
     {
-      "code": 6030,
+      "code": 6031,
       "name": "invalidVaultOwner",
       "msg": "Vault is not owned by the SPL Token program"
     },
     {
-      "code": 6031,
+      "code": 6032,
       "name": "invalidVaultAuthority",
       "msg": "Vault has an unexpected authority"
     },
     {
-      "code": 6032,
+      "code": 6033,
       "name": "invalidVaultMint",
       "msg": "Vault has an unexpected mint"
     },
     {
-      "code": 6033,
+      "code": 6034,
       "name": "invalidVaultData",
       "msg": "Account data is too short to be a valid SPL Token account"
     },
     {
-      "code": 6034,
+      "code": 6035,
       "name": "activeLock",
       "msg": "Liquidity is currently locked and cannot be withdrawn until the lock period expires."
     },
     {
-      "code": 6035,
+      "code": 6036,
       "name": "insufficientLp",
       "msg": "Insufficient LP tokens for this operation."
     },
     {
-      "code": 6036,
+      "code": 6037,
       "name": "vaultsAlreadyInitialized",
       "msg": "Pool vaults already initialized."
     }

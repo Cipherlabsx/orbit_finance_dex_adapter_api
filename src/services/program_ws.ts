@@ -449,7 +449,7 @@ export function startProgramLogStream(params: {
           continue;
         }
 
-        // keep pools table fresh (best-effort)
+        // keep pools table fresh
         try {
           await upsertDexPool({
             pool,
@@ -458,7 +458,6 @@ export function startProgramLogStream(params: {
             quoteMint: poolView.quoteMint,
             baseDecimals: poolView.baseDecimals,
             quoteDecimals: poolView.quoteDecimals,
-            lastPriceQuotePerBase: null
           });
         } catch {
           // ignore

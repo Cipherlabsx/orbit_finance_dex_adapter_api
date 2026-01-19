@@ -434,7 +434,7 @@ async function processSignature(params: {
       quoteMint: pv.quoteMint,
       baseDecimals: pv.baseDecimals,
       quoteDecimals: pv.quoteDecimals,
-      lastPriceQuotePerBase: pv.priceNumber,
+      // lastPriceQuotePerBase: pv.priceNumber,
     });
 
     // Derive strict swap trade (vault delta)

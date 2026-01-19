@@ -52,7 +52,6 @@ export async function upsertDexPool(p: {
   quoteMint: string;
   baseDecimals: number;
   quoteDecimals: number;
-  lastPriceQuotePerBase: number | null;
 }) {
   await upsertWithFallback(
     "dex_pools",
@@ -63,7 +62,6 @@ export async function upsertDexPool(p: {
       quote_mint: p.quoteMint,
       base_decimals: p.baseDecimals,
       quote_decimals: p.quoteDecimals,
-      last_price_quote_per_base: p.lastPriceQuotePerBase,
       updated_at: nowIso(),
     },
     ["pool"]

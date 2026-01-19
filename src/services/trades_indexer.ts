@@ -19,15 +19,13 @@ export type Trade = {
   signature: string;
   slot: number;
   blockTime: number | null;
-
   pool: string;
   user: string | null;
-
   inMint: string | null;
   outMint: string | null;
-
-  amountIn: string | null; // atoms as string
-  amountOut: string | null; // atoms as string
+  amountIn: string | null;
+  amountOut: string | null;
+  priceAfterQ6464?: string;
 };
 
 export type TradeStore = {
@@ -225,44 +223,6 @@ function atomsToUi(atoms: string, decimals: number): number {
   return Number(BigInt(atoms)) / 10 ** decimals;
 }
 
-function computeTradePriceQuotePerBase(args: {
-  inMint: string | null;
-  outMint: string | null;
-  amountIn: string | null;
-  amountOut: string | null;
-  baseMint: string;
-  quoteMint: string;
-  baseDecimals: number;
-  quoteDecimals: number;
-}): number | null {
-  const {
-    inMint,
-    outMint,
-    amountIn,
-    amountOut,
-    baseMint,
-    quoteMint,
-    baseDecimals,
-    quoteDecimals,
-  } = args;
-
-  if (!inMint || !outMint || !amountIn || !amountOut) return null;
-
-  if (inMint === baseMint && outMint === quoteMint) {
-    const base = atomsToUi(amountIn, baseDecimals);
-    const quote = atomsToUi(amountOut, quoteDecimals);
-    return base > 0 ? quote / base : null;
-  }
-
-  if (inMint === quoteMint && outMint === baseMint) {
-    const quote = atomsToUi(amountIn, quoteDecimals);
-    const base = atomsToUi(amountOut, baseDecimals);
-    return base > 0 ? quote / base : null;
-  }
-
-  return null;
-}
-
 async function processSignatureForPool(store: TradeStore, pool: string, sig: string) {
   const seenKey = `${sig}:${pool}`;
   if (store.seen.has(seenKey)) return;
@@ -304,31 +264,38 @@ async function processSignatureForPool(store: TradeStore, pool: string, sig: str
 
   if (!trade) return;
 
+  // extract priceAfterQ6464 from swapExecuted event
+  try {
+    const rawLogs = tx.meta?.logMessages ?? [];
+    for (const l of rawLogs) {
+      if (!l.includes("swapExecuted")) continue;
+      const jsonStart = l.indexOf("{");
+      if (jsonStart === -1) continue;
+      const evt = JSON.parse(l.slice(jsonStart));
+      if (evt?.priceAfterQ6464 != null) {
+        trade.priceAfterQ6464 = evt.priceAfterQ6464.toString();
+      }
+    }
+  } catch {}
+
   pushTrade(store, trade);
 
-  // derive real executed price
+  // write live pool state
   try {
     const pNow = await readPool(pool);
 
-    const tradePrice = computeTradePriceQuotePerBase({
-      inMint: trade.inMint,
-      outMint: trade.outMint,
-      amountIn: trade.amountIn,
-      amountOut: trade.amountOut,
-      baseMint: pNow.baseMint,
-      quoteMint: pNow.quoteMint,
-      baseDecimals: pNow.baseDecimals,
-      quoteDecimals: pNow.quoteDecimals,
-    });
+    let priceUi: number | null = null;
 
-    if (tradePrice != null) {
-      console.log("[LIVE TRADE PRICE]", pool, trade.signature, tradePrice);
+    if (trade.priceAfterQ6464) {
+      const q = BigInt(trade.priceAfterQ6464);
+      const atomsPrice = Number(q) / 2 ** 64;
+      priceUi = atomsPrice * Math.pow(10, pNow.baseDecimals - pNow.quoteDecimals);
     }
 
     await updateDexPoolLiveState({
       pool,
       activeBin: pNow.activeBin,
-      priceQuotePerBase: tradePrice,
+      priceQuotePerBase: priceUi,
       slot: tx.slot,
       signature: trade.signature,
     });

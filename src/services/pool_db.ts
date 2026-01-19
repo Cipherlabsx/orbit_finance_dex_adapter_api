@@ -101,6 +101,12 @@ export async function dbGetPool(pool: string) {
   return (data ?? null) as DbPool | null;
 }
 
+/**
+ * LIVE STATE UPDATE
+ * - slot-gated
+ * - price ONLY written if non-null
+ * - active_bin always written
+ */
 export async function dbUpdatePoolLiveState(args: {
   pool: string;
   slot: number;
@@ -110,18 +116,28 @@ export async function dbUpdatePoolLiveState(args: {
 }) {
   const { pool, slot, signature, activeBin, lastPriceQuotePerBase } = args;
 
-  // Only accept newer updates. Prevent out-of-order overwrites.
+  // slot monotonicity guard
   const gate = `last_update_slot.is.null,last_update_slot.lt.${slot}`;
+
+  const update: Record<string, any> = {
+    active_bin: activeBin,
+    last_update_slot: slot,
+    last_trade_sig: signature ?? null,
+    updated_at: new Date().toISOString(),
+  };
+
+  // never overwrite price with null
+  if (
+    lastPriceQuotePerBase != null &&
+    Number.isFinite(lastPriceQuotePerBase) &&
+    lastPriceQuotePerBase > 0
+  ) {
+    update.last_price_quote_per_base = lastPriceQuotePerBase;
+  }
 
   const { error } = await supabase
     .from("dex_pools")
-    .update({
-      active_bin: activeBin,
-      last_price_quote_per_base: lastPriceQuotePerBase,
-      last_update_slot: slot,
-      last_trade_sig: signature ?? null,
-      updated_at: new Date().toISOString(),
-    })
+    .update(update)
     .eq("pool", pool)
     .or(gate);
 

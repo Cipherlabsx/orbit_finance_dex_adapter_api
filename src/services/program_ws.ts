@@ -12,7 +12,7 @@ import type { TradeStore, Trade } from "./trades_indexer.js";
 import { deriveTradeFromTransaction } from "./trade_derivation.js";
 import { readPool } from "./pool_reader.js";
 import { decodeEventsFromLogs } from "../idl/coder.js";
-import { upsertDexPool, writeDexEvent, writeDexTrade } from "../supabase.js";
+import { updateDexPoolLiveState, upsertDexPool, writeDexEvent, writeDexTrade } from "../supabase.js";
 import type { WsHub } from "./ws.js";
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
@@ -458,7 +458,7 @@ export function startProgramLogStream(params: {
             quoteMint: poolView.quoteMint,
             baseDecimals: poolView.baseDecimals,
             quoteDecimals: poolView.quoteDecimals,
-            lastPriceQuotePerBase: poolView.priceNumber,
+            lastPriceQuotePerBase: null
           });
         } catch {
           // ignore
@@ -483,6 +483,19 @@ export function startProgramLogStream(params: {
         // Persist trade (best-effort)
         try {
           await writeDexTrade(trade);
+        } catch {
+          // ignore
+        }
+
+        // Update live pool state ONLY after a real swap
+        try {
+          await updateDexPoolLiveState({
+            pool,
+            activeBin: poolView.activeBin,
+            priceQuotePerBase: poolView.priceNumber, // executed price
+            slot: tx.slot,
+            signature: sig,
+          });
         } catch {
           // ignore
         }

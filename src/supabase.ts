@@ -18,7 +18,6 @@ function nowUnix() {
 
 function isOnConflictTargetError(err: any): boolean {
   const msg = String(err?.message ?? err ?? "");
-  // PostgREST / Supabase errors vary, these substrings cover the common cases
   return (
     msg.toLowerCase().includes("on conflict") ||
     msg.toLowerCase().includes("constraint") ||
@@ -67,17 +66,11 @@ export async function upsertDexPool(p: {
       last_price_quote_per_base: p.lastPriceQuotePerBase,
       updated_at: nowIso(),
     },
-    ["pool"] // your schema uses PK(pool)
+    ["pool"]
   );
 }
 
-/**
- * Writes ONLY real swaps to dex_trades.
- * - If you keep PK(signature): one row per signature (last one wins)
- * - If you migrate to PK(signature,pool): stores multiple pool trades per tx
- */
 export async function writeDexTrade(trade: Trade) {
-  // Only persist real swap trades where we derived amounts + mints
   if (!trade.inMint || !trade.outMint || !trade.amountIn || !trade.amountOut) return;
 
   const row = {
@@ -93,7 +86,6 @@ export async function writeDexTrade(trade: Trade) {
     inserted_at: nowIso(),
   };
 
-  // Try first (signature,pool), fallback to old-world (signature)
   await upsertWithFallback("dex_trades", row, ["signature,pool", "signature"]);
 }
 
@@ -121,11 +113,6 @@ export async function writeDexEvent(params: {
     inserted_at: nowIso(),
   };
 
-  /**
-   * Support BOTH possible schemas:
-   *  A) unique/PK(signature,event_index,event_type)
-   *  B) unique/PK(signature,event_index)
-   */
   await upsertWithFallback("dex_events", row, [
     "slot,txn_index,event_index,event_type",
     "signature,event_index,event_type",
@@ -140,8 +127,6 @@ export async function updateDexPoolLiveState(params: {
   slot: number;
   signature: string;
 }) {
-  // Only accept updates that are newer than what DB currently has.
-  // We do it in 2 steps because PostgREST update filters are limited.
   const { data: cur, error: readErr } = await supabase
     .from("dex_pools")
     .select("last_update_slot")
@@ -152,19 +137,24 @@ export async function updateDexPoolLiveState(params: {
 
   const curSlot = (cur?.last_update_slot ?? null) as number | null;
   if (curSlot != null && params.slot <= curSlot) {
-    // ignore older/out-of-order update
     return;
+  }
+
+  /** never overwrite price with null */
+  const update: Record<string, any> = {
+    active_bin: params.activeBin,
+    last_update_slot: params.slot,
+    last_trade_sig: params.signature,
+    updated_at: nowIso(),
+  };
+
+  if (params.priceQuotePerBase != null && Number.isFinite(params.priceQuotePerBase)) {
+    update.last_price_quote_per_base = params.priceQuotePerBase;
   }
 
   const { error: updErr } = await supabase
     .from("dex_pools")
-    .update({
-      active_bin: params.activeBin,
-      last_price_quote_per_base: params.priceQuotePerBase,
-      last_update_slot: params.slot,
-      last_trade_sig: params.signature,
-      updated_at: nowIso(),
-    })
+    .update(update)
     .eq("pool", params.pool);
 
   if (updErr) throw new Error(`updateDexPoolLiveState update failed: ${updErr.message}`);

@@ -12,7 +12,7 @@ import type { TradeStore, Trade } from "./trades_indexer.js";
 import { deriveTradeFromTransaction } from "./trade_derivation.js";
 import { readPool } from "./pool_reader.js";
 import { decodeEventsFromLogs } from "../idl/coder.js";
-import { updateDexPoolLiveState, upsertDexPool, writeDexEvent, writeDexTrade } from "../supabase.js";
+import { updateDexPoolLiveState, updateDexPoolLiquidityState, upsertDexPool, writeDexEvent, writeDexTrade } from "../supabase.js";
 import type { WsHub } from "./ws.js";
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
@@ -22,6 +22,13 @@ type AnchorEvent = {
   name: string;
   data?: JsonObject | null;
 };
+
+const LIQ_EVENT_NAMES = new Set([
+  "LiquidityWithdrawnUser",
+  "LiquidityDepositedUser",
+  "LiquidityAddedUser",
+  "LiquidityRemovedUser",
+]);
 
 /**
  * Best-effort: determine pool/pair id from arbitrary event payload.
@@ -70,6 +77,26 @@ function keyToString(k: AccountKeyLike | null): string | null {
   if (typeof k === "string") return k;
   if ("pubkey" in k) return k.pubkey.toBase58();
   return k.toBase58();
+}
+
+function computeLiquidityQuoteFromPostBalances(args: {
+  tx: VersionedTransactionResponse;
+  poolView: Awaited<ReturnType<typeof readPool>>;
+}): number | null {
+  const { tx, poolView } = args;
+
+  const post = getPostVaultReservesAtoms(tx, poolView);
+  if (!post) return null;
+
+  // convert atoms -> ui using decimals (no extra RPC)
+  const baseUi = Number(post.base) / (10 ** poolView.baseDecimals);
+  const quoteUi = Number(post.quote) / (10 ** poolView.quoteDecimals);
+
+  const px = poolView.priceNumber;
+  if (px == null || !Number.isFinite(px) || px <= 0) return null;
+
+  const liq = quoteUi + baseUi * px;
+  return Number.isFinite(liq) ? liq : null;
 }
 
 function getAllAccountKeys(tx: VersionedTransactionResponse): AccountKeyLike[] {
@@ -361,6 +388,7 @@ export function startProgramLogStream(params: {
       try {
         if (decoded.length > 0) {
           let i = 0;
+
           for (const evt of decoded) {
             await writeDexEvent({
               signature: sig,
@@ -375,6 +403,23 @@ export function startProgramLogStream(params: {
             });
 
             const evtPool = poolFromEventData(evt.data ?? null);
+
+            if (evtPool && slot != null && LIQ_EVENT_NAMES.has(evt.name)) {
+              try {
+                const pv = await readPool(evtPool);
+                const liquidityQuote = computeLiquidityQuoteFromPostBalances({ tx, poolView: pv });
+
+                if (liquidityQuote != null) {
+                  await updateDexPoolLiquidityState({
+                    pool: evtPool,
+                    slot,
+                    liquidityQuote,
+                  });
+                }
+              } catch {
+                // never break stream
+              }
+            }
 
             wsHub.broadcast({
               type: "event",

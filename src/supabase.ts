@@ -157,3 +157,29 @@ export async function updateDexPoolLiveState(params: {
 
   if (updErr) throw new Error(`updateDexPoolLiveState update failed: ${updErr.message}`);
 }
+
+export async function updateDexPoolLiquidityState(args: {
+  pool: string;
+  slot: number;
+  liquidityQuote: number;
+}) {
+  const { pool, slot, liquidityQuote } = args;
+
+  const gate = `latest_liq_event_slot.is.null,latest_liq_event_slot.lt.${slot}`;
+
+  const patch: Record<string, any> = {
+    liquidity_quote: liquidityQuote,
+    latest_liq_event_slot: slot,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase
+    .from("dex_pools")
+    .update(patch)
+    .eq("pool", pool)
+    .or(gate);
+
+  if (error) {
+    throw new Error(`updateDexPoolLiquidityState failed: ${error.message}`);
+  }
+}

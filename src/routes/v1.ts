@@ -63,11 +63,6 @@ const TF_SEC: Record<string, number> = {
   "1d": 24 * 60 * 60,
 };
 
-function floorToBucket(tsSec: number, tf: string): number {
-  const step = TF_SEC[tf] ?? 900;
-  return Math.floor(tsSec / step) * step;
-}
-
 export async function v1Routes(app: FastifyInstance) {
   await app.register(websocket);
 

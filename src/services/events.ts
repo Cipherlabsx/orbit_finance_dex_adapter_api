@@ -191,28 +191,37 @@ export async function readEventsBySlotRange(
  * Fallback: if DB empty (fresh boot), return chain slot.
  */
 export async function readLatestBlock(): Promise<{ block: StandardsBlock }> {
-  // Must reflect the latest slot for which /events will return data.
-  // Since /events serves ONLY event_type='swap', latest-block must be based on that too.
+  // latest-block MUST reflect the latest slot where /events would actually return data.
+  // Because /events filters invalid rows (schema, priceNative, reserves), we must do the same here.
+
   const { data, error } = await supabaseAdmin
     .from("dex_events")
-    .select("slot.max(), block_time.max()")
+    .select("signature,slot,block_time,event_type,txn_index,event_index,event_data")
     .eq("event_type", "swap")
-    .not("slot", "is", null);
+    .not("slot", "is", null)
+    .order("slot", { ascending: false })
+    .order("txn_index", { ascending: false })
+    .order("event_index", { ascending: false })
+    .limit(250);
 
-  const row = (data?.[0] ?? null) as { max?: number | null; max_1?: number | null } | null;
-  const maxSlot = row?.max ?? null;
-  const maxBlockTime = row?.max_1 ?? null;
+  if (!error && Array.isArray(data) && data.length > 0) {
+    const rows = data as DexEventRow[];
 
-  if (!error && maxSlot != null) {
-    return {
-      block: {
-        blockNumber: maxSlot,
-        blockTimestamp: maxBlockTime ?? Math.floor(Date.now() / 1000),
-      },
-    };
+    // Find the newest row that would survive /events validation.
+    for (const row of rows) {
+      const ev = rowToSwapEvent(row);
+      if (ev) {
+        return {
+          block: {
+            blockNumber: ev.block.blockNumber,
+            blockTimestamp: ev.block.blockTimestamp,
+          },
+        };
+      }
+    }
   }
 
-  // Fallback if DB empty (fresh boot)
+  // Fallback if DB empty or all recent rows invalid (fresh boot / bad ingestion)
   const slot = await connection.getSlot("confirmed");
   const blockTime = await connection.getBlockTime(slot);
   return {

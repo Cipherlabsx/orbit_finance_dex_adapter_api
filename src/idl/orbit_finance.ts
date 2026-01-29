@@ -11,10 +11,130 @@ export type OrbitFinance = {
     "version": "0.1.0",
     "spec": "0.1.0"
   },
-  "docs": [
-    "Program entrypoint for OrbitFinance."
-  ],
   "instructions": [
+    {
+      "name": "addLiquidityV2",
+      "docs": [
+        "Adds liquidity to multiple bins using BinArray architecture.",
+        "",
+        "# V2 Features",
+        "- Snapshots fee growth before deposit (prevents front-running)",
+        "- Validates vault balance increases match expected amounts",
+        "- Post-deposit accounting validation",
+        "- Auto-compounding fee tracking initialized",
+        "",
+        "# Usage",
+        "Can deposit into bins across multiple BinArrays in a single transaction."
+      ],
+      "discriminator": [
+        126,
+        118,
+        210,
+        37,
+        80,
+        190,
+        19,
+        105
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool (zero-copy)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "Position owner (signs)."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "ownerBase",
+          "docs": [
+            "Owner's base token account."
+          ],
+          "writable": true
+        },
+        {
+          "name": "ownerQuote",
+          "docs": [
+            "Owner's quote token account."
+          ],
+          "writable": true
+        },
+        {
+          "name": "baseVault",
+          "docs": [
+            "Pool's base vault."
+          ],
+          "writable": true
+        },
+        {
+          "name": "quoteVault",
+          "docs": [
+            "Pool's quote vault."
+          ],
+          "writable": true
+        },
+        {
+          "name": "position",
+          "docs": [
+            "Position PDA."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "account",
+                "path": "position.nonce",
+                "account": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "deposits",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "binLiquidityDeposit"
+              }
+            }
+          }
+        }
+      ]
+    },
     {
       "name": "claimProtocolFees",
       "docs": [
@@ -89,6 +209,139 @@ export type OrbitFinance = {
         {
           "name": "takeNft",
           "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "closeAll",
+      "docs": [
+        "BREAK-GLASS: Emergency close-all for a single pool (admin only)."
+      ],
+      "discriminator": [
+        222,
+        63,
+        176,
+        132,
+        200,
+        69,
+        45,
+        127
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "docs": [
+            "Pool PDA (seeded from instruction args)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "baseMint"
+              },
+              {
+                "kind": "arg",
+                "path": "quoteMint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "registry",
+          "docs": [
+            "Registry PDA (so you can re-init same pair after closing)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "baseMint"
+              },
+              {
+                "kind": "arg",
+                "path": "quoteMint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "baseVault",
+          "writable": true
+        },
+        {
+          "name": "quoteVault",
+          "writable": true
+        },
+        {
+          "name": "creatorFeeVault",
+          "writable": true
+        },
+        {
+          "name": "holdersFeeVault",
+          "writable": true
+        },
+        {
+          "name": "nftFeeVault",
+          "writable": true
+        },
+        {
+          "name": "adminBaseAta",
+          "writable": true
+        },
+        {
+          "name": "adminQuoteAta",
+          "writable": true
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "baseMint",
+          "type": "pubkey"
+        },
+        {
+          "name": "quoteMint",
+          "type": "pubkey"
+        },
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "closeAllArgs"
+            }
+          }
         }
       ]
     },
@@ -218,32 +471,54 @@ export type OrbitFinance = {
       ]
     },
     {
-      "name": "createLiquidityBin",
+      "name": "createBinArray",
       "docs": [
-        "Creates a new liquidity bin."
+        "Creates a new BinArray account (holds 64 consecutive bins).",
+        "",
+        "# V2 Architecture",
+        "BinArrays batch 64 bins into a single account for gas efficiency.",
+        "",
+        "# Arguments",
+        "* `lower_bin_index` - Starting bin index (must be multiple of 64)",
+        "",
+        "# Example",
+        "- lower_bin_index=128 → creates array covering bins 128-191",
+        "- lower_bin_index=0 → creates array covering bins 0-63",
+        "- lower_bin_index=-64 → creates array covering bins -64 to -1"
       ],
       "discriminator": [
-        143,
-        97,
-        237,
-        207,
+        107,
+        26,
+        23,
+        62,
+        137,
         213,
-        220,
-        250,
-        67
+        131,
+        235
       ],
       "accounts": [
         {
           "name": "pool",
+          "docs": [
+            "Pool that owns this bin array."
+          ],
           "writable": true
         },
         {
           "name": "admin",
+          "docs": [
+            "Pool admin (must sign to create bins)."
+          ],
           "writable": true,
           "signer": true
         },
         {
-          "name": "liquidityBin",
+          "name": "binArray",
+          "docs": [
+            "New BinArray account to initialize.",
+            "Seeds: [\"bin_array\", pool, lower_bin_index_le]",
+            "lower_bin_index must be aligned to 64-bin boundaries (0, 64, 128, -64, etc.)"
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -252,7 +527,13 @@ export type OrbitFinance = {
                 "value": [
                   98,
                   105,
-                  110
+                  110,
+                  95,
+                  97,
+                  114,
+                  114,
+                  97,
+                  121
                 ]
               },
               {
@@ -261,7 +542,7 @@ export type OrbitFinance = {
               },
               {
                 "kind": "arg",
-                "path": "binIndex"
+                "path": "lowerBinIndex"
               }
             ]
           }
@@ -273,93 +554,8 @@ export type OrbitFinance = {
       ],
       "args": [
         {
-          "name": "binIndex",
-          "type": "u64"
-        },
-        {
-          "name": "lowerBoundQ6464",
-          "type": "u128"
-        },
-        {
-          "name": "upperBoundQ6464",
-          "type": "u128"
-        },
-        {
-          "name": "liquidity",
-          "type": "u128"
-        }
-      ]
-    },
-    {
-      "name": "depositIntoBins",
-      "docs": [
-        "Deposits liquidity into specific bins; mints LP shares to the depositor."
-      ],
-      "discriminator": [
-        54,
-        211,
-        101,
-        119,
-        71,
-        98,
-        126,
-        228
-      ],
-      "accounts": [
-        {
-          "name": "pool",
-          "writable": true
-        },
-        {
-          "name": "depositor",
-          "docs": [
-            "Depositor & LP receiver"
-          ],
-          "signer": true
-        },
-        {
-          "name": "depositorBase",
-          "writable": true
-        },
-        {
-          "name": "depositorQuote",
-          "writable": true
-        },
-        {
-          "name": "baseVault",
-          "writable": true
-        },
-        {
-          "name": "quoteVault",
-          "writable": true
-        },
-        {
-          "name": "lpMint",
-          "writable": true
-        },
-        {
-          "name": "depositorLp",
-          "writable": true
-        },
-        {
-          "name": "tokenProgram",
-          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        }
-      ],
-      "args": [
-        {
-          "name": "entries",
-          "type": {
-            "vec": {
-              "defined": {
-                "name": "binDeposit"
-              }
-            }
-          }
-        },
-        {
-          "name": "minSharesOut",
-          "type": "u64"
+          "name": "lowerBinIndex",
+          "type": "i32"
         }
       ]
     },
@@ -382,7 +578,7 @@ export type OrbitFinance = {
         {
           "name": "admin",
           "docs": [
-            "Pays for initialization; becomes pool admin (can be rotated later)."
+            "Pays for initialization, becomes pool admin (can be rotated later)."
           ],
           "writable": true,
           "signer": true
@@ -399,7 +595,7 @@ export type OrbitFinance = {
         {
           "name": "pool",
           "docs": [
-            "Pool state account (PDA) - zero_copy for stack efficiency."
+            "Pool state account (PDA), zero_copy for stack efficiency."
           ],
           "writable": true,
           "pda": {
@@ -494,6 +690,10 @@ export type OrbitFinance = {
               "name": "feeConfig"
             }
           }
+        },
+        {
+          "name": "accountingMode",
+          "type": "u8"
         }
       ]
     },
@@ -726,6 +926,187 @@ export type OrbitFinance = {
       "args": []
     },
     {
+      "name": "initPosition",
+      "docs": [
+        "init a liquidity position single OR 2-sided"
+      ],
+      "discriminator": [
+        197,
+        20,
+        10,
+        1,
+        97,
+        160,
+        177,
+        91
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initPositionBin",
+      "docs": [
+        "Initializes a PositionBin account binding a Position to a specific LiquidityBin.",
+        "This is usually called once per bin you want to deposit into (or created lazily)."
+      ],
+      "discriminator": [
+        249,
+        110,
+        124,
+        16,
+        185,
+        55,
+        149,
+        13
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "position",
+          "docs": [
+            "Position PDA (canonical seeds), ensures owner & pool binding"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "account",
+                "path": "position.nonce",
+                "account": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "positionBin",
+          "docs": [
+            "PositionBin PDA (canonical)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110,
+                  95,
+                  98,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              },
+              {
+                "kind": "arg",
+                "path": "binIndex"
+              }
+            ]
+          }
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "binIndex",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "lockLiquidity",
       "docs": [
         "Locks liquidity metadata."
@@ -890,20 +1271,28 @@ export type OrbitFinance = {
       ]
     },
     {
-      "name": "swap",
+      "name": "swapV2",
       "docs": [
-        "Executes a swap against the pool.",
-        "matching the internal signature and avoiding the `'1` vs `'2` lifetime clash."
+        "Executes a swap using BinArray architecture with accounting validation.",
+        "",
+        "# V2 Features",
+        "- Traverses bins across multiple BinArrays efficiently",
+        "- Updates fee growth on each bin touched (auto-compounding)",
+        "- Post-swap validation: sum(bin_reserves) == vault_balances",
+        "- Fails transaction if accounting drift detected",
+        "",
+        "# Security",
+        "Stricter than legacy swap - fails loud on accounting errors."
       ],
       "discriminator": [
-        248,
-        198,
-        158,
-        145,
-        225,
-        117,
-        135,
-        200
+        43,
+        4,
+        237,
+        11,
+        26,
+        201,
+        30,
+        98
       ],
       "accounts": [
         {
@@ -916,30 +1305,51 @@ export type OrbitFinance = {
         },
         {
           "name": "userSource",
+          "docs": [
+            "User's source token account (validated in function)"
+          ],
           "writable": true
         },
         {
           "name": "userDestination",
+          "docs": [
+            "User's destination token account (validated in function)"
+          ],
           "writable": true
         },
         {
           "name": "baseVault",
+          "docs": [
+            "Pool's base vault (validated in function)"
+          ],
           "writable": true
         },
         {
           "name": "quoteVault",
+          "docs": [
+            "Pool's quote vault (validated in function)"
+          ],
           "writable": true
         },
         {
           "name": "creatorFeeVault",
+          "docs": [
+            "Creator fee vault (validated in function)"
+          ],
           "writable": true
         },
         {
           "name": "holdersFeeVault",
+          "docs": [
+            "Holders fee vault (validated in function)"
+          ],
           "writable": true
         },
         {
           "name": "nftFeeVault",
+          "docs": [
+            "NFT fee vault (validated in function)"
+          ],
           "writable": true
         },
         {
@@ -960,9 +1370,94 @@ export type OrbitFinance = {
           "name": "route",
           "type": {
             "defined": {
-              "name": "swapRoute"
+              "name": "swapRouteV2"
             }
           }
+        }
+      ]
+    },
+    {
+      "name": "unlockLiquidity",
+      "docs": [
+        "Unlock liquidity (if you implemented lock/unlock with escrow)."
+      ],
+      "discriminator": [
+        154,
+        98,
+        151,
+        31,
+        8,
+        180,
+        144,
+        1
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool state (PDA)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "liquidityLock",
+          "docs": [
+            "Per-user liquidity lock PDA"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  111,
+                  99,
+                  107
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user",
+          "docs": [
+            "User who owns the lock"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "userLp",
+          "docs": [
+            "User LP account to receive unlocked tokens"
+          ],
+          "writable": true
+        },
+        {
+          "name": "escrowLp",
+          "docs": [
+            "Escrow LP account owned by pool PDA"
+          ],
+          "writable": true
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
         }
       ]
     },
@@ -1075,117 +1570,111 @@ export type OrbitFinance = {
       ]
     },
     {
-      "name": "withdrawLiquidity",
+      "name": "withdrawV2",
       "docs": [
-        "Admin-only withdrawal"
+        "Withdraws liquidity from multiple bins with auto-compounded fee distribution.",
+        "",
+        "# V2 Features",
+        "- Calculates accrued fees: (current_fee_growth - initial_fee_growth) * shares",
+        "- Distributes fees automatically (no separate claim needed)",
+        "- Validates vault balance decreases match expected amounts",
+        "- Post-withdrawal accounting validation",
+        "- Completeness check: all relevant bins must be included",
+        "",
+        "# Fee Distribution",
+        "Fees are auto-compounded - withdrawal includes proportional share of all fees",
+        "earned since deposit. No separate claiming required."
       ],
       "discriminator": [
-        149,
-        158,
-        33,
-        185,
-        47,
-        243,
-        253,
-        31
+        242,
+        80,
+        163,
+        0,
+        196,
+        221,
+        194,
+        194
       ],
       "accounts": [
         {
           "name": "pool",
+          "docs": [
+            "Pool (zero-copy)."
+          ],
           "writable": true
         },
         {
-          "name": "admin",
-          "signer": true
-        },
-        {
-          "name": "baseVault",
-          "writable": true
-        },
-        {
-          "name": "quoteVault",
-          "writable": true
-        },
-        {
-          "name": "lpMint",
-          "writable": true
-        },
-        {
-          "name": "adminLp",
-          "writable": true
-        },
-        {
-          "name": "adminBase",
-          "writable": true
-        },
-        {
-          "name": "adminQuote",
-          "writable": true
-        },
-        {
-          "name": "tokenProgram",
-          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        }
-      ],
-      "args": [
-        {
-          "name": "sharesToBurn",
-          "type": "u64"
-        }
-      ]
-    },
-    {
-      "name": "withdrawUser",
-      "discriminator": [
-        86,
-        169,
-        152,
-        107,
-        33,
-        180,
-        134,
-        115
-      ],
-      "accounts": [
-        {
-          "name": "pool",
-          "writable": true
-        },
-        {
-          "name": "user",
+          "name": "owner",
+          "docs": [
+            "Position owner (signs)."
+          ],
           "writable": true,
           "signer": true
         },
         {
-          "name": "userLp",
+          "name": "ownerBase",
+          "docs": [
+            "Owner's base token account."
+          ],
           "writable": true
         },
         {
-          "name": "liquidityLock",
+          "name": "ownerQuote",
           "docs": [
-            "If account doesn't exist, user has no active locks",
-            "We use UncheckedAccount and validate manually to handle cases where account doesn't exist"
-          ]
-        },
-        {
-          "name": "lpMint",
+            "Owner's quote token account."
+          ],
           "writable": true
         },
         {
           "name": "baseVault",
+          "docs": [
+            "Pool's base vault."
+          ],
           "writable": true
         },
         {
           "name": "quoteVault",
+          "docs": [
+            "Pool's quote vault."
+          ],
           "writable": true
         },
         {
-          "name": "userBase",
-          "writable": true
-        },
-        {
-          "name": "userQuote",
-          "writable": true
+          "name": "position",
+          "docs": [
+            "Position PDA."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "account",
+                "path": "position.nonce",
+                "account": "position"
+              }
+            ]
+          }
         },
         {
           "name": "tokenProgram",
@@ -1194,8 +1683,14 @@ export type OrbitFinance = {
       ],
       "args": [
         {
-          "name": "sharesToBurn",
-          "type": "u64"
+          "name": "withdrawals",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "binWithdrawal"
+              }
+            }
+          }
         },
         {
           "name": "minBaseOut",
@@ -1210,16 +1705,29 @@ export type OrbitFinance = {
   ],
   "accounts": [
     {
-      "name": "liquidityBin",
+      "name": "binArray",
       "discriminator": [
+        92,
+        142,
+        92,
+        220,
+        5,
+        148,
+        70,
+        181
+      ]
+    },
+    {
+      "name": "liquidityLock",
+      "discriminator": [
+        154,
+        210,
+        64,
+        149,
+        2,
+        60,
         4,
-        80,
-        150,
-        39,
-        152,
-        88,
-        42,
-        158
+        78
       ]
     },
     {
@@ -1246,6 +1754,32 @@ export type OrbitFinance = {
         177,
         109,
         188
+      ]
+    },
+    {
+      "name": "position",
+      "discriminator": [
+        170,
+        188,
+        143,
+        228,
+        122,
+        64,
+        247,
+        208
+      ]
+    },
+    {
+      "name": "positionBin",
+      "discriminator": [
+        145,
+        172,
+        1,
+        90,
+        204,
+        13,
+        245,
+        171
       ]
     }
   ],
@@ -1274,6 +1808,19 @@ export type OrbitFinance = {
         84,
         221,
         76
+      ]
+    },
+    {
+      "name": "binArrayCreated",
+      "discriminator": [
+        124,
+        208,
+        24,
+        108,
+        92,
+        150,
+        57,
+        156
       ]
     },
     {
@@ -1623,6 +2170,86 @@ export type OrbitFinance = {
       "code": 6037,
       "name": "vaultsAlreadyInitialized",
       "msg": "Pool vaults already initialized."
+    },
+    {
+      "code": 6038,
+      "name": "wrongMode",
+      "msg": "Wrong accounting mode for this instruction."
+    },
+    {
+      "code": 6039,
+      "name": "invalidTokenProgram",
+      "msg": "Invalid token program."
+    },
+    {
+      "code": 6040,
+      "name": "invalidProgramOwner",
+      "msg": "Invalid program-owned account."
+    },
+    {
+      "code": 6041,
+      "name": "invalidPda",
+      "msg": "Invalid PDA for the provided account."
+    },
+    {
+      "code": 6042,
+      "name": "invalidRemainingAccountsLayout",
+      "msg": "Invalid remaining accounts layout."
+    },
+    {
+      "code": 6043,
+      "name": "duplicateBinIndex",
+      "msg": "Duplicate bin index provided."
+    },
+    {
+      "code": 6044,
+      "name": "missingPositionBin",
+      "msg": "Missing position bin account."
+    },
+    {
+      "code": 6045,
+      "name": "positionPoolMismatch",
+      "msg": "Position pool mismatch."
+    },
+    {
+      "code": 6046,
+      "name": "positionOwnerMismatch",
+      "msg": "Position owner mismatch."
+    },
+    {
+      "code": 6047,
+      "name": "binPoolMismatch",
+      "msg": "Bin pool mismatch."
+    },
+    {
+      "code": 6048,
+      "name": "positionBinPositionMismatch",
+      "msg": "PositionBin position mismatch."
+    },
+    {
+      "code": 6049,
+      "name": "positionBinPoolMismatch",
+      "msg": "PositionBin pool mismatch."
+    },
+    {
+      "code": 6050,
+      "name": "accountingInvariantViolation",
+      "msg": "Accounting invariant violated."
+    },
+    {
+      "code": 6051,
+      "name": "insufficientPositionBinShares",
+      "msg": "Insufficient position bin shares."
+    },
+    {
+      "code": 6052,
+      "name": "accountingMismatch",
+      "msg": "Accounting mismatch: bin deltas do not match vault payout. Pass all active bins in remaining_accounts."
+    },
+    {
+      "code": 6053,
+      "name": "duplicateBinAccount",
+      "msg": "Duplicate bin account provided."
     }
   ],
   "types": [
@@ -1685,23 +2312,141 @@ export type OrbitFinance = {
       }
     },
     {
-      "name": "binDeposit",
+      "name": "binArray",
       "docs": [
-        "Per-bin deposit instruction argument"
+        "BinArray account holding BIN_ARRAY_SIZE (64) consecutive bins.",
+        "Bins are indexed as: bin_index = lower_bin_index + array_offset (0..63)",
+        "",
+        "PDA Derivation:",
+        "seeds = [b\"bin_array\", pool.key(), lower_bin_index.to_le_bytes()]",
+        "",
+        "lower_bin_index is always aligned to BIN_ARRAY_SIZE boundaries:",
+        "lower_bin_index = (actual_bin_index / 64) * 64",
+        "",
+        "Example: bin indices 128-191 are stored in BinArray with lower_bin_index=128",
+        "",
+        "Field order optimized to avoid padding (bins placed first after pool for proper alignment)"
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "docs": [
+              "Owning pool."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bins",
+            "docs": [
+              "Packed bins (64 consecutive bins). Must be 16-byte aligned."
+            ],
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "compactBin"
+                  }
+                },
+                64
+              ]
+            }
+          },
+          {
+            "name": "lowerBinIndex",
+            "docs": [
+              "Starting bin index for this array (always multiple of BIN_ARRAY_SIZE)."
+            ],
+            "type": "i32"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved for 16-byte alignment (u128 fields require struct to be 16-byte aligned)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                11
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "binArrayCreated",
+      "docs": [
+        "Event emitted when a new BinArray is created."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "lowerBinIndex",
+            "type": "i32"
+          },
+          {
+            "name": "binArray",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "binLiquidityDeposit",
+      "docs": [
+        "Per-bin liquidity deposit specification."
       ],
       "type": {
         "kind": "struct",
         "fields": [
           {
             "name": "binIndex",
+            "docs": [
+              "Bin index (canonically encoded)"
+            ],
             "type": "u64"
           },
           {
             "name": "baseIn",
+            "docs": [
+              "Base tokens to deposit"
+            ],
             "type": "u64"
           },
           {
             "name": "quoteIn",
+            "docs": [
+              "Quote tokens to deposit"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "minSharesOut",
+            "docs": [
+              "Minimum shares expected (slippage protection)"
+            ],
             "type": "u64"
           }
         ]
@@ -1748,6 +2493,94 @@ export type OrbitFinance = {
           {
             "name": "ts",
             "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "binWithdrawal",
+      "docs": [
+        "Per-bin withdrawal specification."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "binIndex",
+            "docs": [
+              "Bin index (canonically encoded)"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "docs": [
+              "Shares to burn from this bin"
+            ],
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "closeAllArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "finalize",
+            "docs": [
+              "When false: sweep tokens + close bins passed in remaining_accounts.",
+              "When true: also closes vault token accounts + registry + pool."
+            ],
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "compactBin",
+      "docs": [
+        "Compact bin data stored within a BinArray.",
+        "bin_index is implicitly derived as: lower_bin_index + offset"
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "reserveBase",
+            "docs": [
+              "Actual token reserves at this bin's fixed price."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "reserveQuote",
+            "type": "u128"
+          },
+          {
+            "name": "totalShares",
+            "docs": [
+              "Total bin shares outstanding across all positions."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "feeGrowthBaseQ128",
+            "docs": [
+              "Cumulative fee growth per unit of share in Q128 fixed-point.",
+              "Used for auto-compounding fee distribution to position holders.",
+              "Updated on every swap that touches this bin."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "feeGrowthQuoteQ128",
+            "type": "u128"
           }
         ]
       }
@@ -1869,90 +2702,6 @@ export type OrbitFinance = {
       }
     },
     {
-      "name": "liquidityBin",
-      "docs": [
-        "Discrete liquidity bin (price bucket)."
-      ],
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "pool",
-            "docs": [
-              "Owning pool."
-            ],
-            "type": "pubkey"
-          },
-          {
-            "name": "binIndex",
-            "docs": [
-              "Bin index (PDA uses u64 LE for seeds). Math uses signed i32."
-            ],
-            "type": "u64"
-          },
-          {
-            "name": "lowerBoundQ6464",
-            "docs": [
-              "Optional bounds for analytics / sanity (Q64.64)."
-            ],
-            "type": "u128"
-          },
-          {
-            "name": "upperBoundQ6464",
-            "type": "u128"
-          },
-          {
-            "name": "liquidity",
-            "docs": [
-              "Optional notion of \"liquidity units\" (for analytics)."
-            ],
-            "type": "u128"
-          },
-          {
-            "name": "reserveBase",
-            "docs": [
-              "Actual reserves at this bin's fixed price."
-            ],
-            "type": "u128"
-          },
-          {
-            "name": "reserveQuote",
-            "type": "u128"
-          },
-          {
-            "name": "feeGrowthBaseQ128",
-            "docs": [
-              "Cumulative fee growth (per 1 unit of base/quote) in Q128 domain."
-            ],
-            "type": "u128"
-          },
-          {
-            "name": "feeGrowthQuoteQ128",
-            "type": "u128"
-          },
-          {
-            "name": "bump",
-            "docs": [
-              "PDA bump."
-            ],
-            "type": "u8"
-          },
-          {
-            "name": "reserved",
-            "docs": [
-              "Padding / future use."
-            ],
-            "type": {
-              "array": [
-                "u8",
-                7
-              ]
-            }
-          }
-        ]
-      }
-    },
-    {
       "name": "liquidityBinCreated",
       "docs": [
         "Emitted when a new liquidity bin is created."
@@ -1977,9 +2726,9 @@ export type OrbitFinance = {
             "type": "u128"
           },
           {
-            "name": "initialLiquidity",
+            "name": "initialTotalShares",
             "docs": [
-              "Initial bin liquidity recorded at creation."
+              "Initial bin share supply (position-bin accounting)."
             ],
             "type": "u128"
           },
@@ -2023,6 +2772,33 @@ export type OrbitFinance = {
           },
           {
             "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "liquidityLock",
+      "docs": [
+        "Liquidity lock account."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "lockedAmount",
+            "type": "u64"
+          },
+          {
+            "name": "lockEnd",
             "type": "i64"
           }
         ]
@@ -2390,11 +3166,20 @@ export type OrbitFinance = {
             "type": "u8"
           },
           {
+            "name": "accountingMode",
+            "docs": [
+              "Accounting mode:",
+              "0 = legacy global LP shares",
+              "1 = position-bin shares"
+            ],
+            "type": "u8"
+          },
+          {
             "name": "pad",
             "type": {
               "array": [
                 "u8",
-                27
+                26
               ]
             }
           }
@@ -2460,6 +3245,157 @@ export type OrbitFinance = {
           {
             "name": "ts",
             "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "position",
+      "docs": [
+        "A Position represents *ownership authority* in a pool.",
+        "It does NOT store liquidity. All accounting is per-bin in PositionBin.",
+        "",
+        "PDA seeds (canonical):",
+        "[POSITION_SEED, pool, owner, nonce_le]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "docs": [
+              "Owning pool"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "docs": [
+              "Owner of this position"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "nonce",
+            "docs": [
+              "Optional user-defined nonce to allow multiple positions per pool"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "createdAt",
+            "docs": [
+              "Creation timestamp"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "lastUpdated",
+            "docs": [
+              "Last updated timestamp"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved for future use (alignment + upgrades)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "positionBin",
+      "docs": [
+        "A PositionBin represents how many bin-shares",
+        "a specific Position owns in a specific LiquidityBin.",
+        "",
+        "PDA seeds (canonical):",
+        "[POSITION_BIN_SEED, position, bin_index_le]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "docs": [
+              "Parent position"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "pool",
+            "docs": [
+              "Owning pool (redundant but useful for validation)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "binIndex",
+            "docs": [
+              "Bin index this position participates in"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "docs": [
+              "Bin shares owned by this position.",
+              "These are claims on LiquidityBin reserves via:",
+              "amount_out = reserves * shares_burn / total_shares"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "feeGrowthBaseQ128",
+            "docs": [
+              "Accrued fees (optional, future use)"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "feeGrowthQuoteQ128",
+            "type": "u128"
+          },
+          {
+            "name": "lastUpdated",
+            "docs": [
+              "Last update timestamp"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved for upgrades / alignment"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
+            }
           }
         ]
       }
@@ -2540,12 +3476,19 @@ export type OrbitFinance = {
       }
     },
     {
-      "name": "swapRoute",
+      "name": "swapRouteV2",
+      "docs": [
+        "Swap route specifying bin indices to traverse.",
+        "For BinArray architecture, bins can span multiple arrays."
+      ],
       "type": {
         "kind": "struct",
         "fields": [
           {
             "name": "binIndices",
+            "docs": [
+              "Ordered bin indices (best price → worst price)"
+            ],
             "type": {
               "vec": "i32"
             }

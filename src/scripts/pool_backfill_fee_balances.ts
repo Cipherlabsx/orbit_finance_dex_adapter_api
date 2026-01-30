@@ -190,7 +190,7 @@ async function main() {
     return { pool: r.pool, creator, holders, nft, changed };
   });
 
-  // write in batches (upsert style via update-per-row is fine for 6 pools; batching is fine too)
+  // write in batches (upsert style via update-per-row is fine for 6 pools, batching is fine too)
   for (const b of chunk(updates, BATCH)) {
     const changed = b.filter((x) => x.changed);
 

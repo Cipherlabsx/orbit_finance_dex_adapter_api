@@ -1,7 +1,5 @@
 import type { VersionedTransactionResponse } from "@solana/web3.js";
 import { PublicKey } from "@solana/web3.js";
-
-import { PROGRAM_ID } from "../solana.js";
 import type { Trade } from "./trades_indexer.js";
 
 /**

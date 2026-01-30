@@ -14,6 +14,7 @@ import { readPool } from "./pool_reader.js";
 import { decodeEventsFromLogs } from "../idl/coder.js";
 import { updateDexPoolLiveState, updateDexPoolLiquidityState, upsertDexPool, writeDexEvent, writeDexTrade } from "../supabase.js";
 import type { WsHub } from "./ws.js";
+import { formatEventData, getStandardEventType } from "./event_formatters.js";
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
 type JsonObject = { [k: string]: JsonValue };
@@ -354,9 +355,13 @@ export function startProgramLogStream(params: {
   const programIdStr = programId.toBase58();
   const seenTx = new Set<string>();
 
-  const subIdPromise = connection.onLogs(
-    programId,
-    async (logInfo) => {
+  // Use raw RPC call to avoid web3.js PublicKey serialization issues with Triton
+  const subIdPromise = (connection as any)._rpcWebSocket.call("logsSubscribe", [
+    { mentions: [programIdStr] }
+  ]).then((subId: number) => {
+    (connection as any)._rpcWebSocket.on("logsNotification", async (args: any) => {
+      if (args.subscription !== subId) return;
+      const logInfo = args.result.value;
       const sig = logInfo.signature;
       if (!sig) return;
 
@@ -390,24 +395,57 @@ export function startProgramLogStream(params: {
           let i = 0;
 
           for (const evt of decoded) {
+            const evtPool = poolFromEventData(evt.data ?? null);
+
+            // Read pool view if we have a pool address (needed for formatting)
+            let poolView: Awaited<ReturnType<typeof readPool>> | null = null;
+            if (evtPool) {
+              try {
+                poolView = await readPool(evtPool);
+              } catch {
+                // ignore
+              }
+            }
+
+            // Format event data using Coingecko-compliant formatters
+            let formattedEventData: any = null;
+            if (poolView) {
+              try {
+                formattedEventData = formatEventData({
+                  tx,
+                  eventName: evt.name,
+                  eventData: evt.data ?? {},
+                  trade: null, // Will be filled in for swap events below
+                  poolView,
+                });
+              } catch {
+                // Fallback to raw data if formatting fails
+                formattedEventData = evt.data ?? null;
+              }
+            } else {
+              // No pool view available, use raw data
+              formattedEventData = evt.data ?? null;
+            }
+
+            // Get standardized event type
+            const standardEventType = getStandardEventType(evt.name);
+
             await writeDexEvent({
               signature: sig,
               slot,
               blockTime: tx.blockTime ?? null,
               programId: programIdStr,
-              eventType: evt.name,
+              eventType: standardEventType,
               txnIndex,
               eventIndex: i++,
-              eventData: evt.data ?? null,
+              eventData: formattedEventData,
               logs,
             });
 
-            const evtPool = poolFromEventData(evt.data ?? null);
-
-            if (evtPool && slot != null && LIQ_EVENT_NAMES.has(evt.name)) {
+            // Update liquidity state if this is a liquidity event
+            if (evtPool && slot != null && poolView && LIQ_EVENT_NAMES.has(evt.name)) {
               try {
-                const pv = await readPool(evtPool);
-                const liquidityQuote = computeLiquidityQuoteFromPostBalances({ tx, poolView: pv });
+                const liquidityQuote = computeLiquidityQuoteFromPostBalances({ tx, poolView });
 
                 if (liquidityQuote != null) {
                   await updateDexPoolLiquidityState({
@@ -428,7 +466,7 @@ export function startProgramLogStream(params: {
                 signature: sig,
                 slot,
                 blockTime: tx.blockTime ?? null,
-                event: evt.data ? { name: evt.name, data: evt.data } : { name: evt.name },
+                event: formattedEventData ? { name: evt.name, data: formattedEventData } : { name: evt.name },
               },
             });
           }
@@ -554,7 +592,13 @@ export function startProgramLogStream(params: {
         // eventIndex here is "within the transaction" for swap events.
         // If you later support multiple swap events per tx, increment this.
         try {
-          const swapEventData = buildSwapEventData({ tx, trade, poolView });
+          const swapEventData = formatEventData({
+            tx,
+            eventName: "SwapExecuted",
+            eventData: {},
+            trade,
+            poolView,
+          });
           if (swapEventData) {
             await writeDexEvent({
               signature: sig,
@@ -575,14 +619,15 @@ export function startProgramLogStream(params: {
         // Because dex_trades PK may be signature-only, do NOT insert multiple pools per tx.
         break;
       }
-    },
-    "confirmed"
-  );
+    });
+
+    return subId;
+  });
 
   return {
     async stop() {
       const subId = await subIdPromise;
-      await connection.removeOnLogsListener(subId);
+      await (connection as any)._rpcWebSocket.call("logsUnsubscribe", [subId]);
     },
   };
 }

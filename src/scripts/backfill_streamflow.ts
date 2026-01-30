@@ -123,13 +123,13 @@ async function replaceSnapshotInDb(opts: {
   const supa = await getSupa();
   const nowIso = new Date().toISOString();
 
-  // 1) delete existing for vault
+  // delete existing for vault
   {
     const { error } = await supa.from("streamflow_stakes").delete().eq("vault_id", opts.vaultId);
     if (error) throw error;
   }
 
-  // 2) upsert new snapshot (batched)
+  // upsert new snapshot (batched)
   for (let i = 0; i < opts.rows.length; i += UPSERT_BATCH) {
     const chunk = opts.rows.slice(i, i + UPSERT_BATCH).map((r) => ({
       vault_id: opts.vaultId,
@@ -145,7 +145,7 @@ async function replaceSnapshotInDb(opts: {
     if (error) throw error;
   }
 
-  // 3) update totals on vault row
+  // update totals on vault row
   {
     const { error } = await supa
       .from("streamflow_vaults")
@@ -172,7 +172,7 @@ async function main() {
   console.log("Mint:", CIPHER_MINT.toBase58());
   console.log("Decimals:", DECIMALS);
 
-  // 1) fetch ALL signatures for the address
+  // fetch ALL signatures for the address
   const allSigs: Array<{ signature: string }> = [];
   let before: string | undefined;
 
@@ -193,7 +193,7 @@ async function main() {
 
   console.log(`Total signatures fetched: ${allSigs.length}`);
 
-  // 2) fetch transactions & aggregate
+  // fetch transactions & aggregate
   const ownerToStakedRaw = new Map<string, bigint>();
   let scanned = 0;
   let used = 0;
@@ -239,7 +239,7 @@ async function main() {
     await sleep(120);
   }
 
-  // 3) Build rows EXACTLY like stake.json output
+  // Build rows EXACTLY like stake.json output
   const rows: Array<{ owner: string; staked_raw: string }> = [];
   let totalRaw = 0n;
 
@@ -258,7 +258,7 @@ async function main() {
   console.log("Computed owners:", rows.length);
   console.log("Computed totalRaw:", totalRaw.toString());
 
-  // 4) push snapshot to DB
+  // push snapshot to DB
   const supa = await getSupa();
   const vaultId = await resolveVaultId(supa);
 
@@ -267,11 +267,11 @@ async function main() {
   await replaceSnapshotInDb({
     vaultId,
     rows,
-    holdersCount: String(rows.length),       // if your column is numeric/text, string is safest
+    holdersCount: String(rows.length),
     totalStakedRaw: totalRaw.toString(),
   });
 
-  console.log("✅ DB snapshot replaced");
+  console.log("DB snapshot replaced");
   console.log("stats:", { signatures: sigs.length, scanned, used, missing });
 }
 

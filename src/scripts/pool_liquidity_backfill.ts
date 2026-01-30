@@ -23,7 +23,6 @@ type DexPoolRow = {
   lp_supply_raw?: string | number | null;
   liquidity_quote?: string | number | null;
   tvl_locked_quote?: string | number | null;
-
   updated_at?: string | null;
 };
 
@@ -34,8 +33,15 @@ function mustEnv(name: string): string {
 }
 
 const BATCH = Number(process.env.POOL_LIQ_BACKFILL_BATCH ?? 100);
+
+// For “make DB correct now”, do NOT use processed.
+// confirmed is a good default; finalized is slower but safest.
 const RPC_COMMITMENT: Parameters<Connection["getMultipleAccountsInfo"]>[1] =
-  (process.env.POOL_LIQ_RPC_COMMITMENT as any) ?? "processed";
+  (process.env.POOL_LIQ_RPC_COMMITMENT as any) ?? "confirmed";
+
+// Price sanity bounds (quote per base). Prevents another 1000x style corruption.
+const MAX_SANE_PX = Number(process.env.POOL_LIQ_MAX_SANE_PX ?? 100);
+const MIN_SANE_PX = Number(process.env.POOL_LIQ_MIN_SANE_PX ?? 0);
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -119,6 +125,24 @@ function num(x: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function isSanePx(px: number): boolean {
+  return Number.isFinite(px) && px > MIN_SANE_PX && px <= MAX_SANE_PX;
+}
+
+/**
+ * Prefer on-chain vault ratio for price when possible:
+ *   px = quoteUi / baseUi  (quote per base)
+ *
+ * If baseUi is ~0 (empty pool), return null.
+ */
+function priceFromVaults(baseUi: number, quoteUi: number): number | null {
+  if (!Number.isFinite(baseUi) || !Number.isFinite(quoteUi)) return null;
+  if (baseUi <= 0) return null;
+  const px = quoteUi / baseUi;
+  if (!isSanePx(px)) return null;
+  return px;
+}
+
 async function main() {
   const SUPABASE_URL = mustEnv("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
@@ -131,11 +155,13 @@ async function main() {
   const conn = new Connection(SOLANA_RPC_URL, {
     commitment: RPC_COMMITMENT as any,
     disableRetryOnRateLimit: true,
-    confirmTransactionInitialTimeout: 10_000,
+    confirmTransactionInitialTimeout: 15_000,
   });
 
   console.log("[pool_liq_backfill] rpc=", SOLANA_RPC_URL);
+  console.log("[pool_liq_backfill] commitment=", RPC_COMMITMENT);
   console.log("[pool_liq_backfill] batch=", BATCH);
+  console.log("[pool_liq_backfill] sane_px=", { MIN_SANE_PX, MAX_SANE_PX });
 
   const { data, error } = await supa
     .from("dex_pools")
@@ -256,12 +282,17 @@ async function main() {
     const baseUi = toUi(baseRaw, r.base_decimals);
     const quoteUi = toUi(quoteRaw, r.quote_decimals);
 
-    // price (quote per base) for value conversion
-    const price = num(r.last_price_quote_per_base, 0);
+    // Prefer on-chain vault ratio for price; fallback to stored DB px if sane.
+    const pxVault = priceFromVaults(baseUi, quoteUi);
+    const pxStored = num(r.last_price_quote_per_base, 0);
+    const px =
+      pxVault != null ? pxVault :
+      isSanePx(pxStored) ? pxStored :
+      null;
 
-    // liquidity_quote = quoteVault + baseVault * price (in quote units)
-    // if price missing, we still keep quote side as “at least”
-    const liquidityQuote = price > 0 ? quoteUi + baseUi * price : quoteUi;
+    // liquidity_quote = quoteVault + baseVault * px (in quote units)
+    // if px missing, we still keep quote side as “at least”
+    const liquidityQuote = px != null ? quoteUi + baseUi * px : quoteUi;
 
     // LP lock share = escrow_lp / total_supply
     const totalLpUi = toUi(lpMintDec.supplyRaw, lpMintDec.decimals);
@@ -271,7 +302,7 @@ async function main() {
     const lockedShare = totalLpUi > 0 ? Math.max(0, Math.min(1, escrowLpUi / totalLpUi)) : 0;
     const tvlLockedQuote = liquidityQuote * lockedShare;
 
-    const patch: Partial<DexPoolRow> = {
+    const patch: any = {
       escrow_lp_ata: escrowAta,
       escrow_lp_raw: escrowLpRaw.toString(),
       lp_supply_raw: lpMintDec.supplyRaw.toString(),
@@ -279,6 +310,12 @@ async function main() {
       tvl_locked_quote: tvlLockedQuote,
       updated_at: new Date().toISOString(),
     };
+
+    // If we have a sane vault-derived price, update last_price_quote_per_base too.
+    // (This makes the frontend “latest price” correct even if no new swaps come in.)
+    if (pxVault != null) {
+      patch.last_price_quote_per_base = pxVault;
+    }
 
     const { error: updErr } = await supa.from("dex_pools").update(patch).eq("pool", r.pool);
     if (updErr) throw new Error(`[pool_liq_backfill] update failed for pool ${r.pool}: ${updErr.message}`);

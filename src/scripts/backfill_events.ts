@@ -1,15 +1,15 @@
-// Backfill ALL historic program activity into Supabase.
-//
 // Writes:
 // - dex_events: ALL Anchor events (evt.name) with full logs.
 //              If none decoded, writes a fallback "tx" row (logs captured).
 // - dex_events: ALSO writes a Gecko-ready "swap" event row *when* we can derive a real Trade
-//              and have non-junk pool state (price + reserves).
+//              and have non-junk pool state (price + reserves FROM POST VAULT BALANCES).
 // - dex_trades: derived swaps (strict vault-delta derivation).
 // - dex_pools: upserted whenever we successfully read a pool.
+// - dex_pools: updates liquidity_quote on LIQ events using POST VAULT BALANCES.
 //
 // Run:
 //   tsx src/scripts/backfill_events.ts
+//   (or npm run backfill:events)
 //
 // Optional env overrides:
 //   BACKFILL_PAGE_SIZE=500
@@ -29,8 +29,13 @@ import { env } from "../config.js";
 import { decodeEventsFromLogs, type OrbitDecodedEvent } from "../idl/coder.js";
 import { readPool } from "../services/pool_reader.js";
 import { deriveTradeFromTransaction } from "../services/trade_derivation.js";
-import { upsertDexPool, writeDexEvent, writeDexTrade } from "../supabase.js";
-import type { Trade } from "../services/trades_indexer.js";
+import {
+  upsertDexPool,
+  writeDexEvent,
+  writeDexTrade,
+  updateDexPoolLiquidityState,
+} from "../supabase.js";
+import { formatEventData, getStandardEventType } from "../services/event_formatters.js";
 
 type BackfillOpts = {
   pageSize: number;
@@ -51,13 +56,20 @@ type PoolView = {
   baseVault: string;
   quoteVault: string;
 
-  // Needed to write Gecko "swap" event_data without junk:
-  // - priceNative must be > 0 (string)
-  // - reserves must be present
+  activeBin: number;
+
+  // Used for:
+  // - liquidity_quote = quoteUi + baseUi * priceNumber
+  // - Gecko swap payload uses this as priceNative (string)
   priceNumber: number | null;
-  reserveBaseAtoms: string | null;
-  reserveQuoteAtoms: string | null;
 };
+
+const LIQ_EVENT_NAMES = new Set([
+  "LiquidityWithdrawnUser",
+  "LiquidityDepositedUser",
+  "LiquidityAddedUser",
+  "LiquidityRemovedUser",
+]);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -121,9 +133,7 @@ function eventCandidatePools(evt: OrbitDecodedEvent): string[] {
   const out: string[] = [];
 
   const pool = typeof (d as any)?.pool === "string" ? (d as any).pool : null;
-
   const poolId = typeof (d as any)?.poolId === "string" ? (d as any).poolId : null;
-
   const pairId = typeof (d as any)?.pairId === "string" ? (d as any).pairId : null;
 
   if (pool) out.push(pool);
@@ -133,28 +143,15 @@ function eventCandidatePools(evt: OrbitDecodedEvent): string[] {
   return out;
 }
 
+function pickFirstPoolFromEvent(evt: OrbitDecodedEvent): string | null {
+  const cands = eventCandidatePools(evt);
+  return cands.length ? cands[0]! : null;
+}
+
 function uniqStrings(xs: string[]): string[] {
   const s = new Set<string>();
   for (const x of xs) if (x && typeof x === "string") s.add(x);
   return [...s];
-}
-
-/**
- * Decimalize bigint atoms into a decimal string (no rounding, trims trailing zeros).
- * This matches your earlier events.ts helper and is safe for Gecko payloads.
- */
-function decimalize(atoms: bigint, decimals: number): string {
-  const sign = atoms < 0n ? "-" : "";
-  const x = atoms < 0n ? -atoms : atoms;
-  const base = 10n ** BigInt(decimals);
-  const whole = x / base;
-  const frac = x % base;
-  const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
-  return fracStr.length ? `${sign}${whole.toString()}.${fracStr}` : `${sign}${whole.toString()}`;
-}
-
-function isPositiveNumber(n: number | null): n is number {
-  return typeof n === "number" && Number.isFinite(n) && n > 0;
 }
 
 async function loadPoolCached(cache: Map<string, PoolView>, pool: string): Promise<PoolView | null> {
@@ -164,13 +161,6 @@ async function loadPoolCached(cache: Map<string, PoolView>, pool: string): Promi
   try {
     const v = await readPool(pool);
 
-    // NOTE: your readPool() (from earlier code) exposes these:
-    // - baseMint/quoteMint, baseDecimals/quoteDecimals
-    // - baseVault/quoteVault
-    // - priceNumber
-    // - binReserveBaseAtoms/binReserveQuoteAtoms
-    //
-    // If any of these differ in your actual implementation, adjust the field names here.
     const pv: PoolView = {
       pool,
       baseMint: String((v as any).baseMint),
@@ -179,16 +169,8 @@ async function loadPoolCached(cache: Map<string, PoolView>, pool: string): Promi
       quoteDecimals: Number((v as any).quoteDecimals),
       baseVault: String((v as any).baseVault),
       quoteVault: String((v as any).quoteVault),
+      activeBin: Number((v as any).activeBin ?? 0),
       priceNumber: (v as any).priceNumber === null ? null : Number((v as any).priceNumber),
-
-      reserveBaseAtoms:
-        typeof (v as any).binReserveBaseAtoms === "string" || typeof (v as any).binReserveBaseAtoms === "number"
-          ? String((v as any).binReserveBaseAtoms)
-          : null,
-      reserveQuoteAtoms:
-        typeof (v as any).binReserveQuoteAtoms === "string" || typeof (v as any).binReserveQuoteAtoms === "number"
-          ? String((v as any).binReserveQuoteAtoms)
-          : null,
     };
 
     cache.set(pool, pv);
@@ -202,8 +184,6 @@ async function loadPoolCached(cache: Map<string, PoolView>, pool: string): Promi
  * Deterministic txnIndex:
  * - For a given slot, fetch the block (signatures only) and map signature->index.
  * - Cache per slot for speed.
- *
- * Important for Gecko determinism: /events is ordered by (slot, txn_index, event_index).
  */
 type TxnIndexCacheEntry = { ts: number; map: Map<string, number> };
 const TXN_INDEX_CACHE = new Map<number, TxnIndexCacheEntry>();
@@ -230,12 +210,9 @@ async function getTxnIndexForSignature(connection: Connection, slot: number, sig
     const sigs: string[] = [];
     const anyBlock = block as any;
 
-    // Some RPCs return `signatures: string[]`
     if (Array.isArray(anyBlock?.signatures)) {
       for (const s of anyBlock.signatures) if (typeof s === "string") sigs.push(s);
-    }
-    // Others return `transactions: [{ transaction: { signatures: string[] } }]`
-    else if (Array.isArray(anyBlock?.transactions)) {
+    } else if (Array.isArray(anyBlock?.transactions)) {
       for (const t of anyBlock.transactions) {
         const s0 = t?.transaction?.signatures?.[0];
         if (typeof s0 === "string") sigs.push(s0);
@@ -251,87 +228,98 @@ async function getTxnIndexForSignature(connection: Connection, slot: number, sig
   return map.get(sig) ?? 0;
 }
 
-/**
- * Build the Gecko-ready dex_events.event_data payload for event_type='swap'
- * as expected by your DB-backed events.ts:
- *
- * {
- *   maker?: string,
- *   pairId: string,
- *   asset0In?, asset1In?, asset0Out?, asset1Out?,
- *   priceNative: string,
- *   reserves: { asset0: string, asset1: string }
- * }
- */
-function buildGeckoSwapEventData(args: {
-  trade: Trade;
-  pool: PoolView;
-}): Record<string, unknown> | null {
-  const { trade, pool } = args;
+// Post-vault reserves (correct) helpers
+// These mirror your program_ws live indexer logic.
 
-  // Hard correctness: Gecko halts on junk priceNative/reserves.
-  if (!isPositiveNumber(pool.priceNumber)) return null;
-  if (!pool.reserveBaseAtoms || !pool.reserveQuoteAtoms) return null;
+type TokenBalanceLike = { accountIndex?: number; uiTokenAmount?: { amount?: string } };
+type AccountKeyLike = PublicKey | string | { pubkey: PublicKey };
 
-  let reserveBase: bigint;
-  let reserveQuote: bigint;
-  try {
-    reserveBase = BigInt(pool.reserveBaseAtoms);
-    reserveQuote = BigInt(pool.reserveQuoteAtoms);
-  } catch {
-    return null;
+function keyToString(k: AccountKeyLike | null): string | null {
+  if (!k) return null;
+  if (typeof k === "string") return k;
+  if ("pubkey" in k) return k.pubkey.toBase58();
+  return k.toBase58();
+}
+
+function getAllAccountKeys(tx: VersionedTransactionResponse): AccountKeyLike[] {
+  const msg = tx.transaction.message;
+
+  // legacy
+  if ("accountKeys" in msg) return msg.accountKeys as AccountKeyLike[];
+
+  // v0
+  const staticKeys = msg.staticAccountKeys as PublicKey[];
+  const loadedWritable = (tx.meta?.loadedAddresses?.writable ?? []) as PublicKey[];
+  const loadedReadonly = (tx.meta?.loadedAddresses?.readonly ?? []) as PublicKey[];
+
+  return [...staticKeys, ...loadedWritable, ...loadedReadonly];
+}
+
+function findAccountIndex(tx: VersionedTransactionResponse, address: string): number {
+  const keys = getAllAccountKeys(tx);
+  for (let i = 0; i < keys.length; i++) {
+    if (keyToString(keys[i] ?? null) === address) return i;
   }
+  return -1;
+}
 
-  const reserves = {
-    asset0: decimalize(reserveBase, pool.baseDecimals),
-    asset1: decimalize(reserveQuote, pool.quoteDecimals),
-  };
-
-  // Trade must have raw amounts + mints to emit amounts
-  const hasAmounts = !!trade.amountIn && !!trade.amountOut && !!trade.inMint && !!trade.outMint;
-
-  let asset0In: string | undefined;
-  let asset1In: string | undefined;
-  let asset0Out: string | undefined;
-  let asset1Out: string | undefined;
-
-  if (hasAmounts) {
+function toAmountMap(balances: readonly TokenBalanceLike[] | null | undefined): Map<number, bigint> {
+  const m = new Map<number, bigint>();
+  for (const b of balances ?? []) {
+    const idx = Number(b.accountIndex);
+    const raw = b.uiTokenAmount?.amount;
+    if (!Number.isFinite(idx) || typeof raw !== "string") continue;
     try {
-      const inAtoms = BigInt(trade.amountIn!);
-      const outAtoms = BigInt(trade.amountOut!);
-
-      // asset0 = base, asset1 = quote
-      if (trade.inMint === pool.baseMint && trade.outMint === pool.quoteMint) {
-        asset0In = decimalize(inAtoms, pool.baseDecimals);
-        asset1Out = decimalize(outAtoms, pool.quoteDecimals);
-      } else if (trade.inMint === pool.quoteMint && trade.outMint === pool.baseMint) {
-        asset1In = decimalize(inAtoms, pool.quoteDecimals);
-        asset0Out = decimalize(outAtoms, pool.baseDecimals);
-      }
-      // else: mint mismatch (don’t emit amounts)
+      m.set(idx, BigInt(raw));
     } catch {
-      // don’t emit amounts
+      /* ignore */
     }
   }
+  return m;
+}
 
-  const payload: Record<string, unknown> = {
-    pairId: pool.pool,
-    priceNative: String(pool.priceNumber),
-    reserves,
-  };
+/**
+ * Compute vault reserves AFTER this tx from tx.meta.postTokenBalances.
+ * This is the most correct "post-event reserves" available to an indexer.
+ */
+function getPostVaultReservesAtoms(
+  tx: VersionedTransactionResponse,
+  poolView: PoolView
+): { base: bigint; quote: bigint } | null {
+  if (!tx.meta) return null;
 
-  if (trade.user) payload.maker = trade.user;
+  const baseIdx = findAccountIndex(tx, poolView.baseVault);
+  const quoteIdx = findAccountIndex(tx, poolView.quoteVault);
+  if (baseIdx < 0 || quoteIdx < 0) return null;
 
-  // Only include amounts if they satisfy Gecko “one-side in, other-side out”
-  if (asset0In && asset1Out) {
-    payload.asset0In = asset0In;
-    payload.asset1Out = asset1Out;
-  } else if (asset1In && asset0Out) {
-    payload.asset1In = asset1In;
-    payload.asset0Out = asset0Out;
-  }
+  const post = toAmountMap(tx.meta.postTokenBalances as any);
 
-  return payload;
+  const basePost = post.get(baseIdx);
+  const quotePost = post.get(quoteIdx);
+  if (basePost == null || quotePost == null) return null;
+
+  return { base: basePost, quote: quotePost };
+}
+
+function computeLiquidityQuoteFromPostBalances(args: {
+  tx: VersionedTransactionResponse;
+  poolView: PoolView;
+}): number | null {
+  const { tx, poolView } = args;
+
+  const post = getPostVaultReservesAtoms(tx, poolView);
+  if (!post) return null;
+
+  const px = poolView.priceNumber;
+  if (px == null || !Number.isFinite(px) || px <= 0) return null;
+
+  // NOTE: Number(BigInt) is safe for typical vault sizes, but could overflow in extreme cases.
+  // For production-hardening, switch to decimal math (bigint division) if you expect giant values.
+  const baseUi = Number(post.base) / 10 ** poolView.baseDecimals;
+  const quoteUi = Number(post.quote) / 10 ** poolView.quoteDecimals;
+
+  const liq = quoteUi + baseUi * px;
+  return Number.isFinite(liq) ? liq : null;
 }
 
 async function processSignature(params: {
@@ -360,13 +348,12 @@ async function processSignature(params: {
   const slot = typeof tx.slot === "number" ? tx.slot : null;
   const blockTime = typeof tx.blockTime === "number" ? tx.blockTime : null;
 
-  // Deterministic per-slot ordering
   const txnIndex = slot != null ? await getTxnIndexForSignature(connection, slot, signature) : 0;
 
   const logs = toLogs(tx);
   const decoded = decodeEventsFromLogs(logs);
 
-  // 1) Persist raw Anchor event rows (and fallback "tx") to dex_events
+  // Persist ALL Anchor events using formatters
   if (decoded.length === 0) {
     await writeDexEvent({
       signature,
@@ -382,23 +369,71 @@ async function processSignature(params: {
   } else {
     for (let i = 0; i < decoded.length; i += 1) {
       const evt = decoded[i]!;
+      const evtPool = pickFirstPoolFromEvent(evt);
+
+      // Load pool view if available for formatting
+      let poolView: PoolView | null = null;
+      if (evtPool) {
+        poolView = await loadPoolCached(poolCache, evtPool);
+      }
+
+      // Format event data using Coingecko-compliant formatters
+      let formattedEventData: any = null;
+      if (poolView) {
+        try {
+          formattedEventData = formatEventData({
+            tx,
+            eventName: evt.name,
+            eventData: evt.data ?? {},
+            trade: null, // Will be filled separately for swaps
+            poolView,
+          });
+        } catch {
+          // Fallback to raw data if formatting fails
+          formattedEventData = safeEventData(evt.data);
+        }
+      } else {
+        // No pool view, use raw data
+        formattedEventData = safeEventData(evt.data);
+      }
+
+      // Get standardized event type
+      const standardEventType = getStandardEventType(evt.name);
+
       await writeDexEvent({
         signature,
         slot,
         blockTime,
         programId: programIdStr,
-        eventType: evt.name,
+        eventType: standardEventType,
         txnIndex,
         eventIndex: i,
-        eventData: safeEventData(evt.data),
+        eventData: formattedEventData,
         logs,
       });
+
+      // If this is a LIQ event and we have pool view, update dex_pools.liquidity_quote
+      // using POST vault balances for this transaction (same as live stream).
+      if (poolView && slot != null && LIQ_EVENT_NAMES.has(evt.name)) {
+        try {
+          const liq = computeLiquidityQuoteFromPostBalances({ tx, poolView });
+          if (liq != null) {
+            await updateDexPoolLiquidityState({
+              pool: evtPool!,
+              slot,
+              liquidityQuote: liq,
+            });
+          }
+        } catch {
+          // never fail backfill on liquidity patch
+        }
+      }
     }
   }
 
   const wroteEvents = decoded.length === 0 ? 1 : decoded.length;
 
-  // 2) Discover candidate pools (events first, then account-scan fallback)
+  // Discover candidate pools (events first, then account-scan fallback)
   const poolsFromEvents = uniqStrings(decoded.flatMap(eventCandidatePools));
   const pools: string[] = [...poolsFromEvents];
 
@@ -434,7 +469,6 @@ async function processSignature(params: {
       quoteMint: pv.quoteMint,
       baseDecimals: pv.baseDecimals,
       quoteDecimals: pv.quoteDecimals,
-      // lastPriceQuotePerBase: pv.priceNumber,
     });
 
     // Derive strict swap trade (vault delta)
@@ -451,8 +485,14 @@ async function processSignature(params: {
     await writeDexTrade(trade);
     wroteTrades += 1;
 
-    // ALSO write Gecko-ready "swap" row for /events consumers (Coingecko adapter)
-    const geckoData = buildGeckoSwapEventData({ trade, pool: pv });
+    // ALSO write Gecko-ready "swap" row for /events consumers
+    const geckoData = formatEventData({
+      tx,
+      eventName: "SwapExecuted",
+      eventData: {},
+      trade,
+      poolView: pv,
+    });
     if (geckoData) {
       await writeDexEvent({
         signature,

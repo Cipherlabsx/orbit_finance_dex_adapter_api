@@ -158,13 +158,13 @@ function decodePoolToPatch(data: Buffer): Partial<DexPoolRow> | null {
 
     const activeBin = asNumberI32(pickUnknown(raw, ["activeBin", "active_bin"]), "active_bin");
 
-    // your pool_reader uses initialBinId / initial_bin_id
+    // pool_reader uses initialBinId / initial_bin_id
     const initialBin = asNumberI32(
       pickUnknown(raw, ["initialBinId", "initial_bin_id", "initialBin", "initial_bin"]),
       "initial_bin_id"
     );
 
-    // your pool_reader uses pauseBits/binStepBps/baseFeeBps (and snake-case fallbacks)
+    // pool_reader uses pauseBits/binStepBps/baseFeeBps (and snake-case fallbacks)
     const pausedBits = asNumberU32(pickUnknown(raw, ["pauseBits", "pause_bits"]) ?? 0, "pause_bits");
     const binStepBps = asNumberU16(pickUnknown(raw, ["binStepBps", "bin_step_bps"]) ?? 0, "bin_step_bps");
     const baseFeeBps = asNumberU16(pickUnknown(raw, ["baseFeeBps", "base_fee_bps"]) ?? 0, "base_fee_bps");

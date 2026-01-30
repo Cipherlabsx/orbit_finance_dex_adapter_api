@@ -18,6 +18,8 @@ import { createVolumeStore, ingestFromTradeStore, startVolumeAggregator } from "
 import { createCandleStore, ingestCandlesFromTradeStore, startCandleAggregator } from "./services/candle_aggregator.js";
 import { createStreamflowStakeStore, startStreamflowStakingAggregator } from "./services/streamflow_staking_indexer.js";
 import { createFeesStore, initFeesFromDb, startFeesAggregator } from "./services/fees_aggregator.js";
+import { initPriceCache, cleanPriceCache } from "./services/price_oracle.js";
+import { dbListTokens } from "./services/token_registry.js";
 
 /**
  * Logger
@@ -43,11 +45,11 @@ await app.register(helmet, { global: true });
  * CORS
  * - If you provided allowlist, use it
  * - Else allow all (common for adapter endpoints consumed by partners)
- * - Only allow GET (API is read-only)
+ * - Allow GET and POST (for pool creation)
  */
 await app.register(cors, {
   origin: corsOrigins.length ? corsOrigins : true,
-  methods: ["GET"],
+  methods: ["GET", "POST"],
 });
 
 /**
@@ -154,6 +156,13 @@ seedPoolsIntoTradeStore(app.poolsList);
 await initFeesFromDb(app.feesStore, app.poolsList);
 
 /**
+ * Initialize price cache with all tokens from registry
+ */
+const registeredTokens = await dbListTokens();
+const tokenMints = registeredTokens.map((t) => t.mint);
+await initPriceCache(tokenMints);
+
+/**
  * One-time historic backfill
  */
 await backfillTrades(app.tradeStore, app.poolsList);
@@ -214,11 +223,26 @@ const interval = setInterval(
 );
 
 /**
+ * Periodic price cache refresh (every 10 seconds)
+ */
+const priceInterval = setInterval(async () => {
+  try {
+    cleanPriceCache(); // Clean stale entries BEFORE fetching
+    const tokens = await dbListTokens();
+    const mints = tokens.map((t) => t.mint);
+    await initPriceCache(mints);
+  } catch (err) {
+    app.log.warn({ err }, "price cache refresh failed");
+  }
+}, 10000);
+
+/**
  * Graceful shutdown
  */
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, "shutting down");
   clearInterval(interval);
+  clearInterval(priceInterval);
 
   indexer.stop();
   volumeAgg.stop();

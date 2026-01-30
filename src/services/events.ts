@@ -37,11 +37,41 @@ export type StandardsSwapEvent = {
   };
 };
 
-export type StandardsEventsResponse = {
-  events: StandardsSwapEvent[];
+export type StandardsLiquidityEvent = {
+  block: StandardsBlock;
+  eventType: "liquidityDeposit" | "liquidityWithdraw";
+  txnId: string;
+  txnIndex: number;
+  eventIndex: number;
+  maker: string;
+  pairId: string;
+
+  asset0Amount: string;
+  asset1Amount: string;
+  shares: string;
+  priceNative: string;
+  reserves: {
+    asset0: string;
+    asset1: string;
+  };
 };
 
-// ---- Validation of persisted payload (dex_events.event_data) ----
+export type StandardsGenericEvent = {
+  block: StandardsBlock;
+  eventType: string;
+  txnId: string;
+  txnIndex: number;
+  eventIndex: number;
+  [key: string]: any;
+};
+
+export type StandardsEvent = StandardsSwapEvent | StandardsLiquidityEvent | StandardsGenericEvent;
+
+export type StandardsEventsResponse = {
+  events: StandardsEvent[];
+};
+
+// Validation of persisted payload (dex_events.event_data)
 //
 // For Step 1 we expect the ingestion path to store Gecko-ready payload in event_data.
 // If it's not there yet, events will be skipped (to avoid halting the indexer with junk).
@@ -118,7 +148,7 @@ function rowToSwapEvent(row: DexEventRow): StandardsSwapEvent | null {
 
   const d = parsed.data;
 
-  // Gecko will halt on priceNative=0 or invalid
+  // halt on priceNative=0 or invalid
   if (!isPositiveDecimalString(d.priceNative)) return null;
 
   // Reserves must be numeric-ish (at least parseable)
@@ -147,37 +177,89 @@ function rowToSwapEvent(row: DexEventRow): StandardsSwapEvent | null {
   };
 }
 
+function rowToEvent(row: DexEventRow): StandardsEvent | null {
+  if (row.slot == null || row.block_time == null) return null;
+
+  // Try swap event first
+  if (row.event_type === "swap") {
+    return rowToSwapEvent(row);
+  }
+
+  // Handle liquidity events
+  if (row.event_type === "liquidityDeposit" || row.event_type === "liquidityWithdraw") {
+    const data = row.event_data ?? {};
+
+    // Validate required fields
+    if (!data.pairId || !data.asset0Amount || !data.asset1Amount) return null;
+
+    return {
+      block: { blockNumber: row.slot, blockTimestamp: row.block_time },
+      eventType: row.event_type as "liquidityDeposit" | "liquidityWithdraw",
+      txnId: row.signature,
+      txnIndex: row.txn_index ?? 0,
+      eventIndex: row.event_index ?? 0,
+      maker: data.maker ?? "11111111111111111111111111111111",
+      pairId: data.pairId,
+      asset0Amount: data.asset0Amount,
+      asset1Amount: data.asset1Amount,
+      shares: data.shares ?? "0",
+      priceNative: data.priceNative ?? "0",
+      reserves: data.reserves ?? { asset0: "0", asset1: "0" },
+    };
+  }
+
+  // Handle all other event types as generic events
+  const data = row.event_data ?? {};
+  return {
+    block: { blockNumber: row.slot, blockTimestamp: row.block_time },
+    eventType: row.event_type,
+    txnId: row.signature,
+    txnIndex: row.txn_index ?? 0,
+    eventIndex: row.event_index ?? 0,
+    ...data,
+  };
+}
+
 /**
  * /events?fromBlock&toBlock (inclusive)
  * DB-backed and deterministic.
  *
  * Note: we keep the first parameter for route compatibility,
- * but we ignore it since DB is the source-of-truth for Gecko.
+ * but we ignore it since DB is the source-of-truth.
+ *
+ * Supports optional event type filtering.
  */
 export async function readEventsBySlotRange(
   _storeIgnored: unknown,
   fromSlot: number,
-  toSlot: number
+  toSlot: number,
+  eventTypes?: string[]
 ): Promise<StandardsEventsResponse> {
   if (toSlot < fromSlot) return { events: [] };
 
-  const { data, error } = await supabaseAdmin
+  let query = supabaseAdmin
     .from("dex_events")
     .select("signature,slot,block_time,event_type,txn_index,event_index,event_data")
-    .eq("event_type", "swap")
     .gte("slot", fromSlot)
     .lte("slot", toSlot)
     .order("slot", { ascending: true })
     .order("txn_index", { ascending: true })
     .order("event_index", { ascending: true });
 
+  // Filter by event types if provided
+  if (eventTypes && eventTypes.length > 0) {
+    query = query.in("event_type", eventTypes);
+  }
+
+  const { data, error } = await query;
+
   if (error) return { events: [] };
 
   const rows = (data ?? []) as DexEventRow[];
-  const events: StandardsSwapEvent[] = [];
+  const events: StandardsEvent[] = [];
 
   for (const row of rows) {
-    const ev = rowToSwapEvent(row);
+    const ev = rowToEvent(row);
     if (ev) events.push(ev);
   }
   return { events };
@@ -185,45 +267,15 @@ export async function readEventsBySlotRange(
 
 /**
  * /latest-block
- * Gecko rule: latest-block MUST be the latest block where /events has data available.
+ * MUST advance with the chain head so pollers don't stall
+ * during periods of no program activity.
  *
- * Implementation: max(slot) from dex_events.
- * Fallback: if DB empty (fresh boot), return chain slot.
+ * /events may return empty for ranges with no swaps.
  */
 export async function readLatestBlock(): Promise<{ block: StandardsBlock }> {
-  // latest-block MUST reflect the latest slot where /events would actually return data.
-  // Because /events filters invalid rows (schema, priceNative, reserves), we must do the same here.
-
-  const { data, error } = await supabaseAdmin
-    .from("dex_events")
-    .select("signature,slot,block_time,event_type,txn_index,event_index,event_data")
-    .eq("event_type", "swap")
-    .not("slot", "is", null)
-    .order("slot", { ascending: false })
-    .order("txn_index", { ascending: false })
-    .order("event_index", { ascending: false })
-    .limit(250);
-
-  if (!error && Array.isArray(data) && data.length > 0) {
-    const rows = data as DexEventRow[];
-
-    // Find the newest row that would survive /events validation.
-    for (const row of rows) {
-      const ev = rowToSwapEvent(row);
-      if (ev) {
-        return {
-          block: {
-            blockNumber: ev.block.blockNumber,
-            blockTimestamp: ev.block.blockTimestamp,
-          },
-        };
-      }
-    }
-  }
-
-  // Fallback if DB empty or all recent rows invalid (fresh boot / bad ingestion)
   const slot = await connection.getSlot("confirmed");
   const blockTime = await connection.getBlockTime(slot);
+
   return {
     block: {
       blockNumber: slot,

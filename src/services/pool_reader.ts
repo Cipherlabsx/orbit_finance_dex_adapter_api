@@ -1,6 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
 import { AccountLayout } from "@solana/spl-token";
-
 import { PROGRAM_ID, connection, pk } from "../solana.js";
 import { safeNumber } from "../utils/http.js";
 import { deriveBinPda } from "../utils/pda.js";
@@ -9,30 +8,21 @@ import { decodeAccount } from "../idl/coder.js";
 export type PoolView = {
   id: string;
   programId: string;
-
   baseMint: string;
   quoteMint: string;
-
   baseDecimals: number;
   quoteDecimals: number;
-
   priceQ6464: string;
   priceNumber: number | null;
-
   baseVault: string;
   quoteVault: string;
-
   creatorFeeVault: string | null;
   holdersFeeVault: string | null;
   nftFeeVault: string | null;
-
   activeBin: number;
   initialBin: number;
-
-  // Active-bin reserves in ATOMS (stringified bigint)
   binReserveBaseAtoms: string | null;
   binReserveQuoteAtoms: string | null;
-
   admin: string;
   pausedBits: number;
   binStepBps: number;
@@ -237,7 +227,6 @@ export async function readPool(pool: string): Promise<PoolView> {
       const binInfo = await connection.getAccountInfo(binPda, "confirmed");
       if (binInfo?.data) {
         const binRaw: any = decodeAccount("LiquidityBin", Buffer.from(binInfo.data));
-
         const reserveBaseVal = pick<any>(binRaw, ["reserveBase", "reserve_base"]);
         const reserveQuoteVal = pick<any>(binRaw, ["reserveQuote", "reserve_quote"]);
 
@@ -257,32 +246,24 @@ export async function readPool(pool: string): Promise<PoolView> {
   return {
     id: pool,
     programId: PROGRAM_ID.toBase58(),
-
     baseMint: baseMintPk.toBase58(),
     quoteMint: quoteMintPk.toBase58(),
-
     baseDecimals,
     quoteDecimals,
-
     priceQ6464: priceQ64.toString(),
     priceNumber,
-
     baseVault: baseVaultPk.toBase58(),
     quoteVault: quoteVaultPk.toBase58(),
-
     creatorFeeVault:
       creatorFeeVaultPk != null ? asPk(creatorFeeVaultPk, "creator_fee_vault").toBase58() : null,
     holdersFeeVault:
       holdersFeeVaultPk != null ? asPk(holdersFeeVaultPk, "holders_fee_vault").toBase58() : null,
     nftFeeVault:
       nftFeeVaultPk != null ? asPk(nftFeeVaultPk, "nft_fee_vault").toBase58() : null,
-
     activeBin,
     initialBin,
-
     binReserveBaseAtoms,
     binReserveQuoteAtoms,
-
     admin: adminPk.toBase58(),
     pausedBits: pauseBits,
     binStepBps,

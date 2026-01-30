@@ -12,6 +12,12 @@ import { getPoolVolumesAll } from "../services/volume_aggregator.js";
 import { getCandles, getCandlesBundle } from "../services/candle_aggregator.js";
 import { getOwnerStreamflowStakes, listStreamflowVaults } from "../services/streamflow_staking_indexer.js";
 import { dbListPools, dbGetPool } from "../services/pool_db.js";
+import { dbListTokens, dbGetToken } from "../services/token_registry.js";
+import { getTokenPrice, getRelativePrice, getBatchPrices } from "../services/price_oracle.js";
+import { calculateHolderClaimable, calculateNftClaimable } from "../services/rewards.js";
+import { buildPoolCreationTransactions, type FeeConfig } from "../services/pool_creation.js";
+import { readPool } from "../services/pool_reader.js";
+import { upsertDexPool } from "../supabase.js";
 
 /**
  * Small helper: choose pool set.
@@ -66,7 +72,7 @@ const TF_SEC: Record<string, number> = {
 export async function v1Routes(app: FastifyInstance) {
   await app.register(websocket);
 
-  // GET /api/v1/ws-ticket  -> { ticket, expiresInSec }
+  // GET /api/v1/ws-ticket -> { ticket, expiresInSec }
   app.get("/ws-ticket", async (req, reply) => {
     try {
       const { ticket, expiresInSec } = mintWsTicket();
@@ -202,6 +208,272 @@ export async function v1Routes(app: FastifyInstance) {
     };
   });
 
+  // GET /api/v1/tokens -> List all tokens
+  app.get("/tokens", async (req, reply) => {
+    const q = z
+      .object({
+        verified: z.coerce.boolean().optional(),
+      })
+      .parse((req.query ?? {}) as any);
+
+    let tokens = await dbListTokens();
+
+    if (q.verified !== undefined) {
+      tokens = tokens.filter((t) => t.verified === q.verified);
+    }
+
+    // strip hot fields so this endpoint is "metadata truth"
+    const tokensMeta = tokens.map(({ priceUsd, lastPriceUpdate, ...meta }) => meta);
+
+    // long cache (adjust as you like)
+    reply.header("cache-control", "public, max-age=3600"); // 1 hour
+    return { tokens: tokensMeta, ts: Date.now() };
+  });
+
+  // GET /api/v1/tokens/:mint -> Get token by mint
+  app.get("/tokens/:mint", async (req, reply) => {
+    const params = z.object({ mint: z.string().min(32) }).parse(req.params);
+    const token = await dbGetToken(params.mint);
+
+    if (!token) {
+      return { error: "token_not_found", mint: params.mint };
+    }
+
+    const { priceUsd, lastPriceUpdate, ...meta } = token;
+
+    reply.header("cache-control", "public, max-age=3600");
+    return { token: meta, ts: Date.now() };
+  });
+
+  // GET /api/v1/prices?mints=mint1,mint2 -> Get prices for tokens
+  app.get("/prices", async (req, reply) => {
+    const q = z
+      .object({
+        mints: z.string().optional(),
+      })
+      .parse((req.query ?? {}) as any);
+
+    if (!q.mints) {
+      return { error: "mints_required", message: "Provide comma-separated mints" };
+    }
+
+    const mints = q.mints.split(",").map((m) => m.trim()).filter((m) => m.length >= 32);
+
+    if (mints.length === 0) {
+      return { error: "invalid_mints" };
+    }
+
+    const prices = await getBatchPrices(mints);
+
+    reply.header("cache-control", "public, max-age=5");
+    return { prices, ts: Date.now() };
+  });
+
+  // GET /api/v1/price/:mint -> Get price for single token
+  app.get("/price/:mint", async (req, reply) => {
+    const params = z.object({ mint: z.string().min(32) }).parse(req.params);
+    const result = await getTokenPrice(params.mint);
+
+    reply.header("cache-control", "public, max-age=5");
+    return {
+      mint: params.mint,
+      priceUsd: result.priceUsd,
+      lastUpdated: result.lastUpdated,
+      ts: Date.now(),
+    };
+  });
+
+  app.get("/tokens/by-mints", async (req, reply) => {
+    const q = z.object({ mints: z.string() }).parse((req.query ?? {}) as any);
+    const mints = q.mints.split(",").map((m) => m.trim()).filter((m) => m.length >= 32);
+
+    if (!mints.length) return { error: "invalid_mints" };
+
+    // quick n dirty: reuse dbGetToken in parallel for 11 tokens
+    const rows = await Promise.all(mints.map((m) => dbGetToken(m)));
+    const tokens = rows.filter(Boolean).map((t) => {
+      const { priceUsd, lastPriceUpdate, ...meta } = t as any;
+      return meta;
+    });
+
+    reply.header("cache-control", "public, max-age=3600");
+    return { tokens, ts: Date.now() };
+  });
+
+  // GET /api/v1/price-quote?base=X&quote=Y -> Get relative price
+  app.get("/price-quote", async (req, reply) => {
+    const q = z
+      .object({
+        base: z.string().min(32),
+        quote: z.string().min(32),
+      })
+      .parse((req.query ?? {}) as any);
+
+    const result = await getRelativePrice(q.base, q.quote);
+
+    reply.header("cache-control", "public, max-age=10");
+    return {
+      base: q.base,
+      quote: q.quote,
+      price: result.price,
+      baseUsd: result.baseUsd,
+      quoteUsd: result.quoteUsd,
+      lastUpdated: result.lastUpdated,
+      ts: Date.now(),
+    };
+  });
+
+  // POST /api/v1/pool/create -> Build pool creation transactions
+  app.post("/pool/create", async (req, reply) => {
+    const schema = z.object({
+      admin: z.string().length(44),
+      creator: z.string().length(44),
+      baseMint: z.string().length(44),
+      quoteMint: z.string().length(44),
+      binStepBps: z.number().int().refine((v) => [1, 5, 10, 25, 50, 100].includes(v), {
+        message: "binStepBps must be one of: 1, 5, 10, 25, 50, 100",
+      }),
+      initialPrice: z.number().positive(),
+      feeConfig: z.object({
+        baseFeeBps: z.number().int().min(0).max(10000),
+        creatorCutBps: z.number().int().min(0).max(10000),
+        splitHoldersMicrobps: z.number().int().min(0).max(100000),
+        splitNftMicrobps: z.number().int().min(0).max(100000),
+        splitCreatorExtraMicrobps: z.number().int().min(0).max(100000),
+      }).refine(
+        (cfg) => cfg.splitHoldersMicrobps + cfg.splitNftMicrobps + cfg.splitCreatorExtraMicrobps === 100000,
+        { message: "Fee splits must sum to exactly 100,000 microbps" }
+      ),
+      accountingMode: z.number().int().min(0).max(1),
+      settings: z.object({
+        priorityLevel: z.enum(["fast", "turbo", "ultra"]).optional(),
+      }).optional(),
+    });
+
+    try {
+      const body = schema.parse(req.body);
+
+      // Validate tokens exist in registry
+      const baseToken = await dbGetToken(body.baseMint);
+      const quoteToken = await dbGetToken(body.quoteMint);
+
+      if (!baseToken) {
+        reply.code(400);
+        return { error: "base_token_not_in_registry", mint: body.baseMint };
+      }
+      if (!quoteToken) {
+        reply.code(400);
+        return { error: "quote_token_not_in_registry", mint: body.quoteMint };
+      }
+
+      // Validate creator cut <= base fee
+      if (body.feeConfig.creatorCutBps > body.feeConfig.baseFeeBps) {
+        reply.code(400);
+        return {
+          error: "invalid_fee_config",
+          message: `creatorCutBps (${body.feeConfig.creatorCutBps}) cannot exceed baseFeeBps (${body.feeConfig.baseFeeBps})`,
+        };
+      }
+
+      // Build transactions
+      const result = await buildPoolCreationTransactions({
+        admin: body.admin,
+        creator: body.creator,
+        baseMint: body.baseMint,
+        quoteMint: body.quoteMint,
+        binStepBps: body.binStepBps,
+        initialPrice: body.initialPrice,
+        baseDecimals: baseToken.decimals,
+        quoteDecimals: quoteToken.decimals,
+        feeConfig: body.feeConfig,
+        accountingMode: body.accountingMode,
+        priorityLevel: body.settings?.priorityLevel ?? "turbo",
+      });
+
+      reply.header("cache-control", "no-store");
+      return {
+        success: true,
+        ...result,
+        ts: Date.now(),
+      };
+    } catch (error) {
+      // Handle validation and business logic errors
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Check if it's a validation error from pool_creation.ts
+      if (
+        errorMessage.includes("canonical order") ||
+        errorMessage.includes("binStepBps must be") ||
+        errorMessage.includes("splits must sum") ||
+        errorMessage.includes("initialPrice must")
+      ) {
+        reply.code(400);
+        return { error: "validation_failed", message: errorMessage };
+      }
+
+      // Unexpected error
+      console.error("Pool creation error:", error);
+      reply.code(500);
+      return { error: "internal_error", message: "Failed to build pool creation transactions" };
+    }
+  });
+
+  // POST /api/v1/pool/register -> Register newly created pool in database
+  app.post("/pool/register", async (req, reply) => {
+    const schema = z.object({
+      poolAddress: z.string().length(44),
+      signature: z.string().min(64), // Transaction signature as proof
+    });
+
+    try {
+      const body = schema.parse(req.body);
+
+      // Fetch pool account from chain to verify it exists and get metadata
+      let poolData;
+      try {
+        poolData = await readPool(body.poolAddress);
+      } catch (error) {
+        reply.code(404);
+        return {
+          error: "pool_not_found",
+          message: `Pool ${body.poolAddress} not found on-chain. Ensure init_pool and init_pool_vaults transactions are confirmed.`,
+        };
+      }
+
+      // Write to database
+      await upsertDexPool({
+        pool: body.poolAddress,
+        programId: poolData.programId,
+        baseMint: poolData.baseMint,
+        quoteMint: poolData.quoteMint,
+        baseDecimals: poolData.baseDecimals,
+        quoteDecimals: poolData.quoteDecimals,
+      });
+
+      reply.header("cache-control", "no-store");
+      return {
+        success: true,
+        pool: body.poolAddress,
+        signature: body.signature,
+        registered: true,
+        ts: Date.now(),
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // If it's a parse error
+      if (errorMessage.includes("validation")) {
+        reply.code(400);
+        return { error: "invalid_request", message: errorMessage };
+      }
+
+      // Database or RPC error
+      console.error("Pool registration error:", error);
+      reply.code(500);
+      return { error: "registration_failed", message: "Failed to register pool in database" };
+    }
+  });
+
   app.get("/pools", async () => {
     const pools = getActivePools(app);
 
@@ -334,12 +606,18 @@ export async function v1Routes(app: FastifyInstance) {
       .object({
         fromBlock: z.coerce.number().int().min(0),
         toBlock: z.coerce.number().int().min(0),
+        eventTypes: z.string().optional(),
       })
       .parse((req.query ?? {}) as any);
 
     if (q.toBlock < q.fromBlock) return { events: [] };
 
-    return await readEventsBySlotRange(app.tradeStore, q.fromBlock, q.toBlock);
+    // Parse event types filter (comma-separated)
+    const eventTypes = q.eventTypes
+      ? q.eventTypes.split(",").map((t) => t.trim()).filter((t) => t.length > 0)
+      : undefined;
+
+    return await readEventsBySlotRange(app.tradeStore, q.fromBlock, q.toBlock, eventTypes);
   });
 
   // GET /api/v1/volumes?tf=24h&pools=pool1,pool2
@@ -397,5 +675,84 @@ export async function v1Routes(app: FastifyInstance) {
     const params = z.object({ owner: z.string().min(32) }).parse(req.params);
     const rows = getOwnerStreamflowStakes((app as any).stakeStore, params.owner);
     return { owner: params.owner, rows, ts: Date.now() };
+  });
+
+  // POST /api/v1/rewards/holder/claimable
+  // Calculate claimable CIPHER holder rewards for a user
+  app.post("/rewards/holder/claimable", async (req, reply) => {
+    const schema = z.object({
+      user: z.string().length(44), // Base58 Solana public key
+    });
+
+    try {
+      const body = schema.parse(req.body);
+
+      const result = await calculateHolderClaimable(body.user);
+
+      reply.header("cache-control", "no-store");
+      return {
+        ...result,
+        ts: Date.now(),
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Validation error
+      if (errorMessage.includes("validation") || errorMessage.includes("invalid")) {
+        reply.code(400);
+        return { error: "invalid_request", message: errorMessage };
+      }
+
+      // Global state not initialized
+      if (errorMessage.includes("not initialized")) {
+        reply.code(503);
+        return { error: "service_not_ready", message: errorMessage };
+      }
+
+      // RPC or blockchain error
+      console.error("Holder claimable calculation error:", error);
+      reply.code(500);
+      return { error: "calculation_failed", message: errorMessage };
+    }
+  });
+
+  // POST /api/v1/rewards/nft/claimable
+  // Calculate claimable NFT holder rewards for a user
+  // Verifies NFT ownership and collection membership
+  app.post("/rewards/nft/claimable", async (req, reply) => {
+    const schema = z.object({
+      user: z.string().length(44), // Base58 Solana public key
+    });
+
+    try {
+      const body = schema.parse(req.body);
+
+      const result = await calculateNftClaimable(body.user);
+
+      reply.header("cache-control", "no-store");
+      return {
+        ...result,
+        ts: Date.now(),
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Validation error
+      if (errorMessage.includes("validation") || errorMessage.includes("invalid")) {
+        reply.code(400);
+        return { error: "invalid_request", message: errorMessage };
+      }
+
+      // Global state not initialized
+      if (errorMessage.includes("not initialized")) {
+        reply.code(503);
+        return { error: "service_not_ready", message: errorMessage };
+      }
+
+      // RPC or blockchain error
+      console.error("NFT claimable calculation error:", error);
+      reply.code(500);
+      return { error: "calculation_failed", message: errorMessage };
+    }
   });
 }

@@ -136,6 +136,233 @@ export type OrbitFinance = {
       ]
     },
     {
+      "name": "claimHolderRewards",
+      "docs": [
+        "Claims holder rewards for CIPHER token holders.",
+        "**STAKING REQUIRED**: Users claim based on time-weighted staked CIPHER amount.",
+        "**PREREQUISITES**:",
+        "- User must call init_user_holder_state first",
+        "- User must stake CIPHER in Streamflow",
+        "- User must call sync_holder_stake at least once",
+        "Rewards are calculated using Q128 index-based tracking (same as Uniswap V3).",
+        "",
+        "# Process",
+        "1. Validate user has synced via sync_holder_stake (last_sync_time > 0)",
+        "2. Calculate current period rewards: (current_index - entry_index) * staked_amount / Q128",
+        "3. Calculate total claimable: pending_rewards + current_period_rewards",
+        "4. Transfer from holders_fee_vault to user",
+        "5. Update user state: clear pending, reset entry_index, increment total_claimed",
+        "",
+        "# Security",
+        "- FLASH LOAN PROTECTION: Uses synced staked_amount from user state, NOT live balance",
+        "- Time-weighted: Rewards only accumulate during staking periods",
+        "- Checkpoint-based: sync_holder_stake verifies stake via Streamflow CPI",
+        "- Index updated after claim (prevents double-claiming)",
+        "- Claimable bounded by vault balance"
+      ],
+      "discriminator": [
+        79,
+        182,
+        142,
+        158,
+        108,
+        127,
+        120,
+        174
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool account (immutable, validation only)"
+          ]
+        },
+        {
+          "name": "holderGlobalState",
+          "docs": [
+            "Global holder state (read current index)"
+          ]
+        },
+        {
+          "name": "user",
+          "docs": [
+            "User claiming rewards"
+          ],
+          "signer": true
+        },
+        {
+          "name": "userRewardDestination",
+          "docs": [
+            "User's destination token account for rewards (pool quote token)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "holdersFeeVault",
+          "docs": [
+            "Holders fee vault (source of reward tokens)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "userHolderState",
+          "docs": [
+            "User holder state (must be synced via sync_holder_stake at least once)",
+            "PDA: [b\"holder_user\", user]",
+            "SECURITY FIX: Added PDA seed validation to prevent wrong user state"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  108,
+                  100,
+                  101,
+                  114,
+                  95,
+                  117,
+                  115,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "poolAuthority",
+          "docs": [
+            "Pool PDA authority (signs for holders_fee_vault transfer)"
+          ]
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "claimNftRewards",
+      "docs": [
+        "Claims NFT rewards for CIPHER_OWLS NFT holders.",
+        "**NO STAKING REQUIRED**: Users claim based on NFT ownership at claim time.",
+        "**PREREQUISITE**: User must call init_user_nft_state first.",
+        "**WEIGHTED BY RARITY**: Rare NFTs earn more than common (Common: 0.025, Uncommon: 0.05, Rare: 0.1).",
+        "**MAX 10 NFTs PER CLAIM**: Prevents compute limit issues.",
+        "",
+        "# Process",
+        "1. Verify each NFT (collection, ownership, rarity)",
+        "2. Calculate total weight: sum(nft_rarities.map(r => r.weight()))",
+        "3. Calculate claimable: (index_delta * user_weight) / Q128",
+        "4. Transfer from nft_fee_vault to user",
+        "5. Update user state with new index",
+        "",
+        "# Security",
+        "- Collection verification via Metaplex (prevents fake NFTs)",
+        "- Ownership verified at claim time (prevents borrowed NFT exploits)",
+        "- Index updated after claim (prevents double-claiming)",
+        "- Claimable bounded by vault balance"
+      ],
+      "discriminator": [
+        155,
+        218,
+        162,
+        252,
+        207,
+        252,
+        197,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool account (immutable, validation only)"
+          ]
+        },
+        {
+          "name": "nftGlobalState",
+          "docs": [
+            "Global NFT state (read current index)"
+          ]
+        },
+        {
+          "name": "user",
+          "docs": [
+            "User claiming rewards"
+          ],
+          "signer": true
+        },
+        {
+          "name": "userRewardDestination",
+          "docs": [
+            "User's destination token account for rewards (pool quote token)",
+            "SECURITY FIX: Added constraint validation for defense-in-depth"
+          ],
+          "writable": true
+        },
+        {
+          "name": "nftFeeVault",
+          "docs": [
+            "NFT fee vault (source of reward tokens)",
+            "SECURITY FIX: Added constraint validation for defense-in-depth"
+          ],
+          "writable": true
+        },
+        {
+          "name": "userNftState",
+          "docs": [
+            "User NFT state (must be pre-initialized via init_user_nft_state)",
+            "PDA: [b\"nft_user\", user]",
+            "SECURITY FIX: Added PDA seed validation"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  110,
+                  102,
+                  116,
+                  95,
+                  117,
+                  115,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "poolAuthority",
+          "docs": [
+            "Pool PDA authority (signs for nft_fee_vault transfer)",
+            "SECURITY FIX: Validated against derived pool PDA in instruction body (step 3)"
+          ]
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "claimProtocolFees",
       "docs": [
         "Claims protocol fees from fee vaults."
@@ -209,139 +436,6 @@ export type OrbitFinance = {
         {
           "name": "takeNft",
           "type": "u64"
-        }
-      ]
-    },
-    {
-      "name": "closeAll",
-      "docs": [
-        "BREAK-GLASS: Emergency close-all for a single pool (admin only)."
-      ],
-      "discriminator": [
-        222,
-        63,
-        176,
-        132,
-        200,
-        69,
-        45,
-        127
-      ],
-      "accounts": [
-        {
-          "name": "admin",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "pool",
-          "docs": [
-            "Pool PDA (seeded from instruction args)"
-          ],
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  111,
-                  111,
-                  108
-                ]
-              },
-              {
-                "kind": "arg",
-                "path": "baseMint"
-              },
-              {
-                "kind": "arg",
-                "path": "quoteMint"
-              }
-            ]
-          }
-        },
-        {
-          "name": "registry",
-          "docs": [
-            "Registry PDA (so you can re-init same pair after closing)"
-          ],
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  103,
-                  105,
-                  115,
-                  116,
-                  114,
-                  121
-                ]
-              },
-              {
-                "kind": "arg",
-                "path": "baseMint"
-              },
-              {
-                "kind": "arg",
-                "path": "quoteMint"
-              }
-            ]
-          }
-        },
-        {
-          "name": "baseVault",
-          "writable": true
-        },
-        {
-          "name": "quoteVault",
-          "writable": true
-        },
-        {
-          "name": "creatorFeeVault",
-          "writable": true
-        },
-        {
-          "name": "holdersFeeVault",
-          "writable": true
-        },
-        {
-          "name": "nftFeeVault",
-          "writable": true
-        },
-        {
-          "name": "adminBaseAta",
-          "writable": true
-        },
-        {
-          "name": "adminQuoteAta",
-          "writable": true
-        },
-        {
-          "name": "tokenProgram",
-          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        }
-      ],
-      "args": [
-        {
-          "name": "baseMint",
-          "type": "pubkey"
-        },
-        {
-          "name": "quoteMint",
-          "type": "pubkey"
-        },
-        {
-          "name": "args",
-          "type": {
-            "defined": {
-              "name": "closeAllArgs"
-            }
-          }
         }
       ]
     },
@@ -560,6 +654,158 @@ export type OrbitFinance = {
       ]
     },
     {
+      "name": "initHolderGlobalState",
+      "docs": [
+        "Initializes global holder reward state (ADMIN ONLY - ONE-TIME).",
+        "**CRITICAL**: Must be called during deployment before any user can claim rewards.",
+        "Admin pays rent (~0.128 SOL for 144 bytes).",
+        "",
+        "# Process",
+        "1. Query CIPHER total supply LIVE (NO HARDCODING)",
+        "2. Create global holder state PDA",
+        "3. Initialize reward_index_q128 to 0 (no retroactive rewards)",
+        "",
+        "# Security",
+        "- Admin-only initialization",
+        "- Validates CIPHER mint address",
+        "- Queries supply live (no hardcoded values)",
+        "- Requires non-zero supply (prevents division by zero)"
+      ],
+      "discriminator": [
+        21,
+        10,
+        69,
+        39,
+        195,
+        87,
+        203,
+        148
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "docs": [
+            "Signer paying rent and performing the initialization.",
+            "Must match PROTOCOL_ADMIN exactly."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "cipherMint",
+          "docs": [
+            "CIPHER token mint used to query total supply.",
+            "The address is validated in the instruction body."
+          ]
+        },
+        {
+          "name": "holderGlobalState",
+          "docs": [
+            "Global holder state PDA.",
+            "Created once and shared across all pools."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  108,
+                  100,
+                  101,
+                  114,
+                  95,
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initNftGlobalState",
+      "docs": [
+        "Initializes global NFT reward state (ADMIN ONLY - ONE-TIME).",
+        "**CRITICAL**: Must be called during deployment before any user can claim NFT rewards.",
+        "Admin pays rent (~0.128 SOL for 144 bytes).",
+        "",
+        "# Process",
+        "1. Create global NFT state PDA",
+        "2. Initialize reward_index_q128 to 0 (no retroactive rewards)",
+        "",
+        "# Security",
+        "- Admin-only initialization",
+        "- Index starts at 0 (prevents retroactive claims)",
+        "- Total collection weight is constant (20,475 verified via Metaplex)"
+      ],
+      "discriminator": [
+        126,
+        182,
+        160,
+        21,
+        28,
+        63,
+        16,
+        75
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "docs": [
+            "Signer paying rent and performing the initialization.",
+            "Must match PROTOCOL_ADMIN exactly."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "nftGlobalState",
+          "docs": [
+            "Global NFT state PDA.",
+            "Created once and shared across all pools."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  110,
+                  102,
+                  116,
+                  95,
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "initPool",
       "docs": [
         "Initializes a new liquidity pool (state + lp_mint + registry)."
@@ -729,13 +975,16 @@ export type OrbitFinance = {
           "writable": true
         },
         {
-          "name": "baseMintAccount",
+          "name": "baseMint",
           "docs": [
-            "Mint accounts (Anchor will deserialize + owner-check)"
+            "Base mint (not deserialized to save stack space, validated by token::mint constraint)"
           ]
         },
         {
-          "name": "quoteMintAccount"
+          "name": "quoteMint",
+          "docs": [
+            "Quote mint (not deserialized to save stack space, validated by token::mint constraint)"
+          ]
         },
         {
           "name": "baseVault",
@@ -911,16 +1160,55 @@ export type OrbitFinance = {
           }
         },
         {
+          "name": "protocolFeeVault",
+          "docs": [
+            "Protocol fee vault (12.5% of total swap fees, token::authority = pool)",
+            "Can be permissionlessly swept to Squads multisig via transfer_protocol_fees instruction"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  95,
+                  102,
+                  101,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "tokenProgram",
           "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
         },
         {
           "name": "systemProgram",
           "address": "11111111111111111111111111111111"
-        },
-        {
-          "name": "rent",
-          "address": "SysvarRent111111111111111111111111111111111"
         }
       ],
       "args": []
@@ -1105,6 +1393,175 @@ export type OrbitFinance = {
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "initUserHolderState",
+      "docs": [
+        "Initializes user holder state for CIPHER holder rewards.",
+        "**PREREQUISITE**: init_holder_global_state must be called first.",
+        "**PREREQUISITE**: Must be called before first claim_holder_rewards call.",
+        "User pays rent (~0.128 SOL for 144 bytes).",
+        "",
+        "# Process",
+        "1. Create user holder state PDA",
+        "2. Initialize with current global index (prevents retroactive rewards)",
+        "",
+        "# Security",
+        "- Permissionless but harmless (just creates tracking account)",
+        "- Initializes with current index (no retroactive rewards)"
+      ],
+      "discriminator": [
+        49,
+        178,
+        188,
+        199,
+        246,
+        133,
+        51,
+        222
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": [
+            "Payer for account creation"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "user",
+          "docs": [
+            "User this state is for (does not need to sign)"
+          ]
+        },
+        {
+          "name": "holderGlobalState",
+          "docs": [
+            "Global holder state (read current index for initialization)"
+          ]
+        },
+        {
+          "name": "userHolderState",
+          "docs": [
+            "User holder state (initialized)",
+            "PDA: [b\"holder_user\", user]"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  108,
+                  100,
+                  101,
+                  114,
+                  95,
+                  117,
+                  115,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initUserNftState",
+      "docs": [
+        "Initializes user NFT state for CIPHER_OWLS NFT holder rewards.",
+        "**PREREQUISITE**: init_nft_global_state must be called first.",
+        "**PREREQUISITE**: Must be called before first claim_nft_rewards call.",
+        "User pays rent (~0.128 SOL for 144 bytes).",
+        "",
+        "# Process",
+        "1. Create user NFT state PDA",
+        "2. Initialize with current global index (prevents retroactive rewards)",
+        "",
+        "# Security",
+        "- Permissionless but harmless (just creates tracking account)",
+        "- Initializes with current index (no retroactive rewards)"
+      ],
+      "discriminator": [
+        175,
+        85,
+        43,
+        138,
+        194,
+        163,
+        71,
+        36
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": [
+            "Payer for account creation"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "user",
+          "docs": [
+            "User this state is for (does not need to sign)"
+          ]
+        },
+        {
+          "name": "nftGlobalState",
+          "docs": [
+            "Global NFT state (read current index for initialization)"
+          ]
+        },
+        {
+          "name": "userNftState",
+          "docs": [
+            "User NFT state (initialized)",
+            "PDA: [b\"nft_user\", user]"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  110,
+                  102,
+                  116,
+                  95,
+                  117,
+                  115,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "lockLiquidity",
@@ -1306,14 +1763,16 @@ export type OrbitFinance = {
         {
           "name": "userSource",
           "docs": [
-            "User's source token account (validated in function)"
+            "User's source token account (validated in function)",
+            "SECURITY FIX: Added ownership constraint"
           ],
           "writable": true
         },
         {
           "name": "userDestination",
           "docs": [
-            "User's destination token account (validated in function)"
+            "User's destination token account (validated in function)",
+            "SECURITY FIX: Added ownership constraint"
           ],
           "writable": true
         },
@@ -1328,6 +1787,13 @@ export type OrbitFinance = {
           "name": "quoteVault",
           "docs": [
             "Pool's quote vault (validated in function)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "protocolFeeVault",
+          "docs": [
+            "Protocol fee vault (12.5% of total swap fees)"
           ],
           "writable": true
         },
@@ -1353,6 +1819,12 @@ export type OrbitFinance = {
           "writable": true
         },
         {
+          "name": "cipherMint",
+          "docs": [
+            "CIPHER token mint (for live supply query in index calculation)"
+          ]
+        },
+        {
           "name": "tokenProgram",
           "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
         }
@@ -1373,6 +1845,194 @@ export type OrbitFinance = {
               "name": "swapRouteV2"
             }
           }
+        }
+      ]
+    },
+    {
+      "name": "syncHolderStake",
+      "docs": [
+        "Synchronizes user's staked CIPHER amount for time-weighted rewards.",
+        "**CRITICAL**: Must be called after every stake/unstake in Streamflow.",
+        "**CRITICAL**: Must be called at least once before first claim_holder_rewards.",
+        "User pays rent on first sync (~0.156 SOL for 176 bytes).",
+        "",
+        "# Process",
+        "1. Verify actual stake amount from Streamflow StakeEntry account (on-chain)",
+        "2. Calculate rewards accrued during previous stake period",
+        "3. Add accrued to pending_rewards (preserves across periods)",
+        "4. Update staked amount to verified value (trustless)",
+        "5. Reset entry_index to current global index",
+        "",
+        "# Arguments",
+        "- stake_pool_address: Streamflow stake pool address (for PDA derivation)",
+        "- stake_entry_nonce: Nonce for the user's StakeEntry (for PDA derivation)",
+        "",
+        "# Security",
+        "- ✅ SECURITY FIX: On-chain verification via Streamflow StakeEntry",
+        "- ✅ No user-provided amount (trustless)",
+        "- ✅ Verifies stake belongs to correct pool and authority",
+        "- Economic security: Can't drain more than proportional share",
+        "- First sync starts from current index (no retroactive rewards)",
+        "- Pending rewards preserve across stake periods (fair accumulation)",
+        "",
+        "# Integration with Streamflow",
+        "- Streamflow Program: STAKEvGqQTtzJZH6BWDcbpzXXn2BBerPAgQ3EGLN2GH",
+        "- CIPHER Mint: Ciphern9cCXtms66s8Mm6wCFC27b2JProRQLYmiLMH3N",
+        "- Frontend must pass correct StakeEntry account and nonce"
+      ],
+      "discriminator": [
+        151,
+        230,
+        186,
+        138,
+        237,
+        187,
+        231,
+        155
+      ],
+      "accounts": [
+        {
+          "name": "holderGlobalState",
+          "docs": [
+            "Global holder reward state (for current index)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "userHolderState",
+          "docs": [
+            "User's holder state (checkpoint tracking)",
+            "MUST be pre-initialized via init_user_holder_state instruction",
+            "PDA: [b\"holder_user\", user]",
+            "SECURITY FIX: Added PDA seed validation"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  108,
+                  100,
+                  101,
+                  114,
+                  95,
+                  117,
+                  115,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user",
+          "docs": [
+            "User (signer)"
+          ],
+          "signer": true
+        },
+        {
+          "name": "streamflowStakeEntry",
+          "docs": [
+            "SECURITY FIX: Streamflow StakeEntry account for verification",
+            "PDA: [b\"stake-entry\", stake_pool, authority, nonce]",
+            "This account proves the user's actual staked amount on-chain",
+            "",
+            "1. Account is owned by Streamflow program",
+            "2. Deserialization succeeds (proves correct discriminator)",
+            "3. Authority matches user",
+            "4. Stake pool matches expected CIPHER pool"
+          ]
+        },
+        {
+          "name": "streamflowProgram",
+          "docs": [
+            "SECURITY FIX: Streamflow program for verification"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "stakePoolAddress",
+          "type": "pubkey"
+        },
+        {
+          "name": "stakeEntryNonce",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "transferProtocolFees",
+      "docs": [
+        "Transfers protocol fees to Squads multisig vault.",
+        "**PERMISSIONLESS**: Anyone can call this to sweep protocol fees.",
+        "The protocol fee (12.5% of total swap fees) is automatically collected",
+        "and can be transferred to the hardcoded Squads vault for protocol treasury.",
+        "",
+        "# Arguments",
+        "* `amount` - Amount to transfer (0 = transfer full protocol_fee_vault balance)",
+        "",
+        "# Security",
+        "- Destination hardcoded to prevent redirect attacks",
+        "- Mint validation ensures correct token",
+        "- Pool PDA authority ensures only pool can sign"
+      ],
+      "discriminator": [
+        142,
+        148,
+        70,
+        57,
+        116,
+        166,
+        82,
+        111
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool account (immutable, just need to read quote_mint and bump)"
+          ]
+        },
+        {
+          "name": "protocolFeeVault",
+          "docs": [
+            "Protocol fee vault PDA (validated against pool.protocol_fee_vault)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "squadsVaultDestination",
+          "docs": [
+            "Squads vault destination token account",
+            "Must match SQUADS_VAULT constant and pool quote_mint"
+          ],
+          "writable": true
+        },
+        {
+          "name": "poolAuthority",
+          "docs": [
+            "Pool PDA authority (signs for protocol_fee_vault transfer)"
+          ]
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
         }
       ]
     },
@@ -1479,6 +2139,9 @@ export type OrbitFinance = {
       "accounts": [
         {
           "name": "pool",
+          "docs": [
+            "SECURITY FIX: Added constraint to validate admin authority at account level (defense-in-depth)"
+          ],
           "writable": true
         },
         {
@@ -1511,11 +2174,21 @@ export type OrbitFinance = {
       "accounts": [
         {
           "name": "pool",
+          "docs": [
+            "Pool account with admin validation",
+            "SECURITY FIX: Added has_one constraint to enforce admin authorization"
+          ],
           "writable": true
         },
         {
           "name": "admin",
-          "signer": true
+          "docs": [
+            "Admin signer (must match pool.admin)"
+          ],
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
         }
       ],
       "args": [
@@ -1568,6 +2241,66 @@ export type OrbitFinance = {
           }
         }
       ]
+    },
+    {
+      "name": "viewFarmingPosition",
+      "docs": [
+        "View farming position analytics (read-only).",
+        "",
+        "Returns comprehensive position data without modifying state:",
+        "- Position shares and ownership",
+        "- Current reserves (position's share of bin liquidity)",
+        "- Accrued fees (auto-compounding via Q128 fee growth)",
+        "- Total value (reserves + fees)",
+        "",
+        "**Use Case:**",
+        "Frontend dashboard to display \"farming\" positions and their accumulated value.",
+        "",
+        "# Returns",
+        "FarmingPositionView struct serialized in transaction return data."
+      ],
+      "discriminator": [
+        29,
+        39,
+        65,
+        136,
+        187,
+        153,
+        243,
+        130
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool account (validation only)"
+          ]
+        },
+        {
+          "name": "position",
+          "docs": [
+            "Position account"
+          ]
+        },
+        {
+          "name": "positionBin",
+          "docs": [
+            "PositionBin account"
+          ]
+        },
+        {
+          "name": "binArray",
+          "docs": [
+            "BinArray containing the bin"
+          ]
+        }
+      ],
+      "args": [],
+      "returns": {
+        "defined": {
+          "name": "farmingPositionView"
+        }
+      }
     },
     {
       "name": "withdrawV2",
@@ -1718,6 +2451,19 @@ export type OrbitFinance = {
       ]
     },
     {
+      "name": "holderGlobalState",
+      "discriminator": [
+        201,
+        13,
+        55,
+        112,
+        49,
+        124,
+        252,
+        241
+      ]
+    },
+    {
       "name": "liquidityLock",
       "discriminator": [
         154,
@@ -1728,6 +2474,19 @@ export type OrbitFinance = {
         60,
         4,
         78
+      ]
+    },
+    {
+      "name": "nftGlobalState",
+      "discriminator": [
+        153,
+        133,
+        196,
+        53,
+        53,
+        146,
+        35,
+        130
       ]
     },
     {
@@ -1779,6 +2538,32 @@ export type OrbitFinance = {
         204,
         13,
         245,
+        171
+      ]
+    },
+    {
+      "name": "userHolderState",
+      "discriminator": [
+        109,
+        105,
+        38,
+        190,
+        82,
+        186,
+        180,
+        81
+      ]
+    },
+    {
+      "name": "userNftState",
+      "discriminator": [
+        41,
+        154,
+        221,
+        64,
+        116,
+        186,
+        73,
         171
       ]
     }
@@ -1834,6 +2619,19 @@ export type OrbitFinance = {
         209,
         141,
         126
+      ]
+    },
+    {
+      "name": "claimHolderRewardsEvent",
+      "discriminator": [
+        97,
+        42,
+        168,
+        9,
+        85,
+        193,
+        87,
+        102
       ]
     },
     {
@@ -1977,6 +2775,19 @@ export type OrbitFinance = {
         89,
         38,
         79
+      ]
+    },
+    {
+      "name": "syncHolderStakeEvent",
+      "discriminator": [
+        47,
+        69,
+        233,
+        184,
+        242,
+        2,
+        125,
+        106
       ]
     }
   ],
@@ -2250,6 +3061,16 @@ export type OrbitFinance = {
       "code": 6053,
       "name": "duplicateBinAccount",
       "msg": "Duplicate bin account provided."
+    },
+    {
+      "code": 6054,
+      "name": "invalidMetadata",
+      "msg": "NFT metadata is invalid or cannot be parsed."
+    },
+    {
+      "code": 6055,
+      "name": "invalidNftRarity",
+      "msg": "NFT rarity indicator not found or invalid in metadata name."
     }
   ],
   "types": [
@@ -2523,17 +3344,53 @@ export type OrbitFinance = {
       }
     },
     {
-      "name": "closeAllArgs",
+      "name": "claimHolderRewardsEvent",
+      "docs": [
+        "Emitted when user claims holder rewards based on staked CIPHER.",
+        "",
+        "**When Emitted:**",
+        "- User calls `claim_holder_rewards()`",
+        "- Only claimable if user has synced their stake at least once",
+        "",
+        "**Calculation:**",
+        "- `current_period_claimed`: Rewards from current stake period (entry_index → current_index)",
+        "- `pending_claimed`: Rewards accumulated from previous stake periods",
+        "- `amount`: Total claimed (current_period + pending)",
+        "",
+        "**Fields:**",
+        "- `user`: User's public key",
+        "- `pool`: Pool address (if pool-specific) or default for global",
+        "- `amount`: Total USDC (or quote token) claimed",
+        "- `pending_claimed`: Portion from previous periods",
+        "- `current_period_claimed`: Portion from current period",
+        "- `timestamp`: Unix timestamp of claim"
+      ],
       "type": {
         "kind": "struct",
         "fields": [
           {
-            "name": "finalize",
-            "docs": [
-              "When false: sweep tokens + close bins passed in remaining_accounts.",
-              "When true: also closes vault token accounts + registry + pool."
-            ],
-            "type": "bool"
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          },
+          {
+            "name": "pendingClaimed",
+            "type": "u128"
+          },
+          {
+            "name": "currentPeriodClaimed",
+            "type": "u128"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
           }
         ]
       }
@@ -2586,6 +3443,103 @@ export type OrbitFinance = {
       }
     },
     {
+      "name": "farmingPositionView",
+      "docs": [
+        "Farming position view data (returned to client)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "docs": [
+              "Pool pubkey"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "docs": [
+              "Position pubkey"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "docs": [
+              "Position owner"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "binIndex",
+            "docs": [
+              "Bin index"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "docs": [
+              "Position shares in this bin"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "totalShares",
+            "docs": [
+              "Total shares in this bin"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "reserveBase",
+            "docs": [
+              "Current reserves (position's share)"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "reserveQuote",
+            "type": "u128"
+          },
+          {
+            "name": "accruedFeeBase",
+            "docs": [
+              "Accrued fees (auto-compounding)"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "accruedFeeQuote",
+            "type": "u128"
+          },
+          {
+            "name": "totalValueBase",
+            "docs": [
+              "Total value (reserves + fees)"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "totalValueQuote",
+            "type": "u128"
+          },
+          {
+            "name": "lastUpdated",
+            "docs": [
+              "Timestamps"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "positionCreatedAt",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
       "name": "feeConfig",
       "docs": [
         "Fee distribution configuration for the pool."
@@ -2597,14 +3551,6 @@ export type OrbitFinance = {
         "kind": "struct",
         "fields": [
           {
-            "name": "baseFeeBps",
-            "type": "u16"
-          },
-          {
-            "name": "creatorCutBps",
-            "type": "u16"
-          },
-          {
             "name": "splitHoldersMicrobps",
             "type": "u32"
           },
@@ -2615,6 +3561,55 @@ export type OrbitFinance = {
           {
             "name": "splitCreatorExtraMicrobps",
             "type": "u32"
+          },
+          {
+            "name": "variableFeeControl",
+            "type": "u32"
+          },
+          {
+            "name": "maxVolatilityAccumulator",
+            "type": "u32"
+          },
+          {
+            "name": "baseFeeBps",
+            "type": "u16"
+          },
+          {
+            "name": "creatorCutBps",
+            "type": "u16"
+          },
+          {
+            "name": "legacyVolatilityMultiplierBps",
+            "type": "u16"
+          },
+          {
+            "name": "filterPeriod",
+            "type": "u16"
+          },
+          {
+            "name": "decayPeriod",
+            "type": "u16"
+          },
+          {
+            "name": "reductionFactorBps",
+            "type": "u16"
+          },
+          {
+            "name": "maxDynamicFeeBps",
+            "type": "u16"
+          },
+          {
+            "name": "dynamicFeeEnabled",
+            "type": "u8"
+          },
+          {
+            "name": "feeReserved",
+            "type": {
+              "array": [
+                "u8",
+                5
+              ]
+            }
           }
         ]
       }
@@ -2665,7 +3660,8 @@ export type OrbitFinance = {
     {
       "name": "feesDistributed",
       "docs": [
-        "Emitted when fees are split to fee vaults during swap."
+        "Emitted when fees are split to fee vaults during swap.",
+        "V2: Includes protocol fee (12.5% of total) extracted FIRST before other splits."
       ],
       "type": {
         "kind": "struct",
@@ -2676,6 +3672,13 @@ export type OrbitFinance = {
           },
           {
             "name": "totalFee",
+            "type": "u64"
+          },
+          {
+            "name": "protocolFee",
+            "docs": [
+              "Protocol cut (12.5% of total_fee, extracted FIRST)"
+            ],
             "type": "u64"
           },
           {
@@ -2697,6 +3700,111 @@ export type OrbitFinance = {
           {
             "name": "ts",
             "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "holderGlobalState",
+      "docs": [
+        "Global state for CIPHER holder rewards across all pools.",
+        "Tracks cumulative reward index using Q128 fixed-point arithmetic.",
+        "",
+        "**Design Philosophy:**",
+        "- No staking required: Users claim based on live CIPHER balance",
+        "- Q128 precision: Same as Uniswap V3 fee growth tracking (2^128 precision levels)",
+        "- Global index: Aggregates rewards from all pools for simplified claiming",
+        "",
+        "**Index Math:**",
+        "```",
+        "reward_index_growth = (holder_fees * Q128) / total_cipher_supply",
+        "user_claimable = (current_index - user_last_index) * user_balance / Q128",
+        "```",
+        "",
+        "**Security:**",
+        "- Index monotonically increases (prevents retroactive claims)",
+        "- Overflow protected by Q128 scale",
+        "- Admin-only index updates (verified in instruction)",
+        "",
+        "PDA Seeds: [b\"holder_global\"]",
+        "Size: 144 bytes (~0.128 SOL rent-exempt)"
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "totalRewardsAccumulated",
+            "docs": [
+              "Total rewards accumulated across all pools (in quote token terms, e.g., USDC/SOL)",
+              "This is a cumulative counter that only increases"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "rewardIndexQ128",
+            "docs": [
+              "Global reward index in Q128 fixed-point format",
+              "Index = cumulative_fees * Q128 / total_cipher_supply",
+              "Monotonically increasing to prevent retroactive claims"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "cachedTotalSupply",
+            "docs": [
+              "Cached total CIPHER supply (updated periodically for gas optimization)",
+              "Real-time supply queried on-chain during index updates"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lastUpdated",
+            "docs": [
+              "Last timestamp when the index was updated",
+              "Used for monitoring and preventing stale data"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "admin",
+            "docs": [
+              "Admin authority (can update index, typically automated crank)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for PDA derivation"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "reserved1",
+            "docs": [
+              "Reserved space for future upgrades (64 bytes: 32 + 32)",
+              "Prevents need for migration if we add new fields",
+              "Split into two arrays due to bytemuck Pod trait limits (max 32 elements)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "reserved2",
+            "type": {
+              "array": [
+                "u8",
+                31
+              ]
+            }
           }
         ]
       }
@@ -2902,6 +4010,116 @@ export type OrbitFinance = {
       }
     },
     {
+      "name": "nftGlobalState",
+      "docs": [
+        "Global state for NFT holder rewards across all pools.",
+        "Tracks cumulative reward index using Q128 fixed-point arithmetic.",
+        "",
+        "**Design Philosophy:**",
+        "- No staking required: Users claim based on NFT ownership at claim time",
+        "- Q128 precision: Same as holder rewards (2^128 precision levels)",
+        "- Weighted by rarity: Rare NFTs earn more than common",
+        "- Global index: Aggregates rewards from all pools for simplified claiming",
+        "",
+        "**Index Math:**",
+        "```",
+        "reward_index_growth = (nft_fees * Q128) / total_collection_weight",
+        "user_claimable = (current_index - user_last_index) * user_nft_weight / Q128",
+        "```",
+        "",
+        "**Security:**",
+        "- Index monotonically increases (prevents retroactive claims)",
+        "- Overflow protected by Q128 scale",
+        "- Admin-only index updates (verified in instruction)",
+        "",
+        "PDA Seeds: [b\"nft_global\"]",
+        "Size: 144 bytes (~0.128 SOL rent-exempt)"
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "totalRewardsAccumulated",
+            "docs": [
+              "Total rewards accumulated across all pools (in quote token terms)",
+              "This is a cumulative counter that only increases"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "rewardIndexQ128",
+            "docs": [
+              "Global reward index in Q128 fixed-point format",
+              "Index = cumulative_fees * Q128 / total_collection_weight",
+              "Monotonically increasing to prevent retroactive claims"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "lastUpdated",
+            "docs": [
+              "Last timestamp when the index was updated",
+              "Used for monitoring and preventing stale data"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "admin",
+            "docs": [
+              "Admin authority (can update index, typically automated crank)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for PDA derivation"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "pad",
+            "docs": [
+              "Additional padding for alignment"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
+            }
+          },
+          {
+            "name": "reserved1",
+            "docs": [
+              "Reserved space for future upgrades (64 bytes: 32 + 32)",
+              "Prevents need for migration if we add new fields",
+              "Split into two arrays due to bytemuck Pod trait limits (max 32 elements)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "reserved2",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "pairRegistered",
       "docs": [
         "Emitted if you keep a separate register_pair instruction (factory/registry path)."
@@ -3030,9 +4248,7 @@ export type OrbitFinance = {
       "name": "pool",
       "docs": [
         "Main pool account holding configuration, authorities, price cache and vaults.",
-        "Fields are ordered to minimize padding for zero-copy compatibility.",
-        "Using unsafe Pod/Zeroable impl because #[repr(C)] may add minimal padding",
-        "between fields of different alignments, but all fields are Pod-compatible."
+        "Fields are ordered to minimize padding for zero-copy compatibility."
       ],
       "serialization": "bytemuck",
       "repr": {
@@ -3090,6 +4306,14 @@ export type OrbitFinance = {
             "type": "pubkey"
           },
           {
+            "name": "protocolFeeVault",
+            "docs": [
+              "Protocol fee vault (12.5% of total swap fees)",
+              "Can be permissionlessly swept to Squads multisig"
+            ],
+            "type": "pubkey"
+          },
+          {
             "name": "lpMint",
             "type": "pubkey"
           },
@@ -3122,11 +4346,33 @@ export type OrbitFinance = {
             "type": "i64"
           },
           {
+            "name": "lastSwapTime",
+            "docs": [
+              "Legacy: timestamp of last swap (can be used for analytics/legacy)"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "lastVolatilityUpdate",
+            "docs": [
+              "timestamp of last volatility update"
+            ],
+            "type": "i64"
+          },
+          {
             "name": "initialBinId",
             "type": "i32"
           },
           {
             "name": "activeBin",
+            "type": "i32"
+          },
+          {
+            "name": "previousBin",
+            "type": "i32"
+          },
+          {
+            "name": "referenceBin",
             "type": "i32"
           },
           {
@@ -3142,6 +4388,34 @@ export type OrbitFinance = {
             "type": "u32"
           },
           {
+            "name": "variableFeeControl",
+            "docs": [
+              "variable_fee_control (C)"
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "maxVolatilityAccumulator",
+            "docs": [
+              "cap on va accumulator"
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "volatilityReference",
+            "docs": [
+              "vr state"
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "volatilityAccumulator",
+            "docs": [
+              "va state"
+            ],
+            "type": "u32"
+          },
+          {
             "name": "binStepBps",
             "type": "u16"
           },
@@ -3151,6 +4425,35 @@ export type OrbitFinance = {
           },
           {
             "name": "creatorCutBps",
+            "type": "u16"
+          },
+          {
+            "name": "legacyVolatilityMultiplierBps",
+            "type": "u16"
+          },
+          {
+            "name": "filterPeriod",
+            "docs": [
+              "seconds"
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "decayPeriod",
+            "type": "u16"
+          },
+          {
+            "name": "reductionFactorBps",
+            "docs": [
+              "0..=10000"
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "maxDynamicFeeBps",
+            "docs": [
+              "Cap on total fee (base + variable)"
+            ],
             "type": "u16"
           },
           {
@@ -3175,11 +4478,33 @@ export type OrbitFinance = {
             "type": "u8"
           },
           {
-            "name": "pad",
+            "name": "dynamicFeeEnabled",
+            "docs": [
+              "Dynamic fee enabled flag (0 = disabled, 1 = enabled)"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "feeReserved",
+            "docs": [
+              "Reserved for future parameters (and padding)"
+            ],
             "type": {
               "array": [
                 "u8",
-                26
+                5
+              ]
+            }
+          },
+          {
+            "name": "pad2",
+            "docs": [
+              "Explicit padding to bring total struct size to a multiple of 8"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                2
               ]
             }
           }
@@ -3487,10 +4812,317 @@ export type OrbitFinance = {
           {
             "name": "binIndices",
             "docs": [
-              "Ordered bin indices (best price → worst price)"
+              "Ordered bin indices (best price -> worst price)"
             ],
             "type": {
               "vec": "i32"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "syncHolderStakeEvent",
+      "docs": [
+        "Emitted when user synchronizes their staked CIPHER amount for time-weighted rewards.",
+        "This is a checkpoint that records stake entry/exit for proper reward calculation.",
+        "",
+        "**When Emitted:**",
+        "- After user stakes/unstakes CIPHER in Streamflow (external program)",
+        "- On first sync (initialization)",
+        "- User must call `sync_holder_stake()` after each Streamflow stake change",
+        "",
+        "**Fields:**",
+        "- `user`: User's public key",
+        "- `previous_staked_amount`: Amount staked before this sync (0 on first sync)",
+        "- `new_staked_amount`: Amount staked after this sync (from Streamflow)",
+        "- `accrued_rewards`: Rewards accumulated during previous stake period",
+        "- `pending_rewards_after`: Total pending rewards (accrued + previous pending)",
+        "- `stake_entry_index`: Global reward index when this stake period began",
+        "- `timestamp`: Unix timestamp of sync"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "previousStakedAmount",
+            "type": "u64"
+          },
+          {
+            "name": "newStakedAmount",
+            "type": "u64"
+          },
+          {
+            "name": "accruedRewards",
+            "type": "u128"
+          },
+          {
+            "name": "pendingRewardsAfter",
+            "type": "u128"
+          },
+          {
+            "name": "stakeEntryIndex",
+            "type": "u128"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "userHolderState",
+      "docs": [
+        "Per-user holder reward claim state with time-weighted staking checkpoints.",
+        "Tracks stake periods and accumulated rewards from CIPHER staked via Streamflow.",
+        "",
+        "**CRITICAL REQUIREMENT:**",
+        "Users MUST stake CIPHER via Streamflow to earn holder rewards.",
+        "Rewards only accumulate during periods when tokens are actively staked.",
+        "",
+        "**Checkpoint System:**",
+        "- User calls `sync_holder_stake()` after each stake/unstake in Streamflow",
+        "- Sync records: entry index, staked amount, pending rewards from previous period",
+        "- Claim calculates: pending + (current_index - entry_index) * staked_amount / Q128",
+        "",
+        "**Time-Weighted Formula:**",
+        "```",
+        "On sync:",
+        "accrued = (current_index - entry_index) * previous_staked_amount / Q128",
+        "pending_rewards += accrued  // Preserve from past periods",
+        "entry_index = current_index  // Start new period",
+        "staked_amount = new_amount   // Update stake",
+        "",
+        "On claim:",
+        "current_period = (current_index - entry_index) * staked_amount / Q128",
+        "total_claimable = pending_rewards + current_period",
+        "transfer(total_claimable)",
+        "pending_rewards = 0",
+        "entry_index = current_index",
+        "```",
+        "",
+        "**Security:**",
+        "- Self-reported staked amount (validated by frontend against indexer)",
+        "- Economic security: Can't drain more than proportional share (vault balance cap)",
+        "- First sync initializes with current index (prevents retroactive claims)",
+        "- Pending rewards preserve across stake periods (fair accumulation)",
+        "",
+        "**Integration with Streamflow:**",
+        "- Streamflow Program: STAKEvGqQTtzJZH6BWDcbpzXXn2BBerPAgQ3EGLN2GH",
+        "- Indexer tracks stakes: GET /api/v1/streamflow/stakes/:owner",
+        "- Frontend validates sync amount against indexer (prevents errors)",
+        "- No on-chain Streamflow verification (self-reported + economic security)",
+        "",
+        "PDA Seeds: [b\"holder_user\", user_pubkey]",
+        "Size: 160 bytes (~0.142 SOL rent-exempt, paid by user on first sync)"
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "stakeEntryIndexQ128",
+            "docs": [
+              "Reward index when current stake period began",
+              "Set on each sync to current global index",
+              "Used to calculate rewards accumulated during current period"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "pendingRewards",
+            "docs": [
+              "Accumulated rewards from previous stake periods (unclaimed)",
+              "Preserved across syncs to allow multi-period accumulation",
+              "Reset to 0 on claim"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "totalClaimed",
+            "docs": [
+              "Total rewards claimed by this user (cumulative, never decreases)",
+              "Sum across all periods and claim events",
+              "Denominated in quote token (e.g., USDC)"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "user",
+            "docs": [
+              "User this state belongs to"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved space for future upgrades (40 bytes)",
+              "Reduced from 64 bytes due to new fields"
+            ],
+            "type": {
+              "array": [
+                "u64",
+                5
+              ]
+            }
+          },
+          {
+            "name": "currentStakedAmount",
+            "docs": [
+              "Current staked CIPHER amount (per last sync)",
+              "Updated via `sync_holder_stake()` after each Streamflow stake/unstake",
+              "",
+              "SECURITY: ON-CHAIN VERIFIED via Streamflow CPI (NOT self-reported)",
+              "- Reads actual amount from Streamflow StakeEntry account",
+              "- Verifies account owned by Streamflow program",
+              "- Validates authority, stake pool, nonce, and active status",
+              "- See: sync_holder_stake.rs verify_and_get_stake_amount()"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lastClaimTime",
+            "docs": [
+              "Last timestamp when user claimed rewards",
+              "Used for analytics and monitoring"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "lastSyncTime",
+            "docs": [
+              "Last timestamp when user synced their stake",
+              "Used to detect stale state and prompt frontend to sync"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for PDA derivation"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "pad",
+            "docs": [
+              "Additional padding to align struct to 16-byte boundary (Pod requirement)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                15
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "userNftState",
+      "docs": [
+        "Per-user NFT reward claim state.",
+        "Tracks the last claimed index to calculate pending rewards.",
+        "",
+        "**Design:**",
+        "- Initialized lazily on first claim (saves rent for non-claimers)",
+        "- Index-based claiming prevents double-claiming",
+        "- No NFT list stored (verifies ownership at claim time)",
+        "",
+        "**Claiming Formula:**",
+        "```",
+        "index_delta = current_index - user_last_claimed_index",
+        "user_nft_weight = sum(nft_rarities.map(r => r.weight()))",
+        "claimable = (index_delta * user_nft_weight) / Q128",
+        "```",
+        "",
+        "**Security:**",
+        "- First claim initializes with current index (prevents retroactive claims)",
+        "- Index updated after claim (prevents double-claiming same period)",
+        "- NFT ownership checked at claim time (prevents borrowed NFT exploits)",
+        "- Max 10 NFTs per claim (prevents compute limit issues)",
+        "",
+        "PDA Seeds: [b\"nft_user\", user_pubkey]",
+        "Size: 144 bytes (~0.128 SOL rent-exempt, paid by user on first claim)"
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "docs": [
+              "User this state belongs to"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "lastClaimedIndexQ128",
+            "docs": [
+              "Last reward index when user claimed",
+              "Initialized to current index on first claim (prevents retroactive)"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "totalClaimed",
+            "docs": [
+              "Total rewards claimed by this user (cumulative, never decreases)",
+              "Sum across all pools and claim events",
+              "Denominated in quote token (e.g., USDC)"
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "lastClaimTime",
+            "docs": [
+              "Last timestamp when user claimed",
+              "Used for analytics and rate limiting (if desired)"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved space for future upgrades (64 bytes)",
+              "Using u64 array to avoid Pod padding issues"
+            ],
+            "type": {
+              "array": [
+                "u64",
+                8
+              ]
+            }
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for PDA derivation"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "pad",
+            "docs": [
+              "Additional padding to reach target size"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
             }
           }
         ]

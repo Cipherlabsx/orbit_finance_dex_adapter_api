@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json && cp src/idl/*.json dist/idl/",
     "start": "node dist/index.js",
     "ws:ticket": "node tests/scripts/ws_ticket.mjs",
+    "sync-tokens": "tsx src/scripts/sync_tokens.ts",
     "backfill:events": "tsx src/scripts/backfill_events.ts",
     "backfill:streamflow": "tsx src/scripts/backfill_streamflow.ts",
     "backfill:pools": "tsx src/scripts/pool_backfill.ts",
@@ -20,6 +21,7 @@
     "@fastify/helmet": "^11.1.1",
     "@fastify/rate-limit": "^8.1.1",
     "@fastify/websocket": "^8.3.1",
+    "@metaplex-foundation/mpl-token-metadata": "^3.4.0",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
     "@supabase/supabase-js": "^2.90.1",
@@ -38,5 +40,6 @@
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.2",
     "typescript": "^5.9.3"
-  }
+  },
+  "packageManager": "pnpm@10.16.1+sha512.0e155aa2629db8672b49e8475da6226aa4bdea85fdcdfdc15350874946d4f3c91faaf64cbdc4a5d1ab8002f473d5c3fcedcd197989cf0390f9badd3c04678706"
 }

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
+import { PublicKey } from "@solana/web3.js";
 import { env, HTTP_BASE, poolsFromEnv } from "../config.js";
 import { readBins } from "../services/pool_reader.js";
 import { getTrades, listIndexedPools } from "../services/trades_indexer.js";
@@ -325,12 +326,25 @@ export async function v1Routes(app: FastifyInstance) {
 
   // POST /api/v1/pool/create -> Build pool creation transactions
   app.post("/pool/create", async (req, reply) => {
+    // Validator for Solana public keys (base58, 43-44 chars)
+    const publicKeyValidator = z.string().min(43).max(44).refine(
+      (str) => {
+        try {
+          new PublicKey(str);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: "Must be a valid Solana public key" }
+    );
+
     const schema = z.object({
-      admin: z.string().length(44),
-      creator: z.string().length(44),
-      baseMint: z.string().length(44),
-      quoteMint: z.string().length(44),
-      lpMintPublicKey: z.string().length(44), // SECURITY: Client-generated, only public key
+      admin: publicKeyValidator,
+      creator: publicKeyValidator,
+      baseMint: publicKeyValidator,
+      quoteMint: publicKeyValidator,
+      lpMintPublicKey: publicKeyValidator, // SECURITY: Client-generated, only public key
       binStepBps: z.number().int().refine((v) => [1, 5, 10, 25, 50, 100].includes(v), {
         message: "binStepBps must be one of: 1, 5, 10, 25, 50, 100",
       }),
@@ -416,7 +430,11 @@ export async function v1Routes(app: FastifyInstance) {
       // Unexpected error
       console.error("Pool creation error:", error);
       reply.code(500);
-      return { error: "internal_error", message: "Failed to build pool creation transactions" };
+      return {
+        error: "internal_error",
+        message: error instanceof Error ? error.message : "Failed to build pool creation transactions",
+        details: process.env.NODE_ENV === "development" ? errorMessage : undefined
+      };
     }
   });
 

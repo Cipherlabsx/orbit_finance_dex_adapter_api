@@ -536,7 +536,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const [positionPda] = derivePositionPda(poolPda, adminPk, positionNonce);
 
   const initPositionData = coder.instruction.encode("init_position", {
-    nonce: positionNonce,
+    nonce: new BN(positionNonce.toString()),
   });
 
   const initPositionIx = serializeInstruction(
@@ -561,7 +561,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const quoteAmountRaw = BigInt(Math.floor(parseFloat(quoteAmount) * 10 ** quoteDecimals));
 
   // Build deposits array - distribute evenly across bins
-  const deposits: Array<{ bin_index: number; amount: bigint }> = [];
+  const depositsRaw: Array<{ bin_index: number; amount: bigint }> = [];
   const totalBins = upperBinIndex - lowerBinIndex + 1;
 
   // Simple uniform distribution strategy
@@ -573,14 +573,20 @@ export async function buildPoolCreationWithLiquidityTransactions(
     // For bins above active: only quote token
     // Active bin: both tokens
     if (binIndex < activeBin && baseShare > 0n) {
-      deposits.push({ bin_index: binIndex, amount: baseShare });
+      depositsRaw.push({ bin_index: binIndex, amount: baseShare });
     } else if (binIndex > activeBin && quoteShare > 0n) {
-      deposits.push({ bin_index: binIndex, amount: quoteShare });
+      depositsRaw.push({ bin_index: binIndex, amount: quoteShare });
     } else if (binIndex === activeBin) {
-      if (baseShare > 0n) deposits.push({ bin_index: binIndex, amount: baseShare });
-      if (quoteShare > 0n) deposits.push({ bin_index: binIndex, amount: quoteShare });
+      if (baseShare > 0n) depositsRaw.push({ bin_index: binIndex, amount: baseShare });
+      if (quoteShare > 0n) depositsRaw.push({ bin_index: binIndex, amount: quoteShare });
     }
   }
+
+  // Convert bigint amounts to BN for Borsh encoding
+  const deposits = depositsRaw.map(d => ({
+    bin_index: d.bin_index,
+    amount: new BN(d.amount.toString()),
+  }));
 
   const addLiquidityData = coder.instruction.encode("add_liquidity_v2", {
     deposits,

@@ -316,7 +316,7 @@ export async function buildPoolCreationTransactions(
   // Build init_pool instruction
   const coder = new BorshCoder(ORBIT_IDL);
 
-  const initPoolData = coder.instruction.encode("initPool", {
+  const initPoolData = coder.instruction.encode("init_pool", {
     baseMint: baseMintPk,
     quoteMint: quoteMintPk,
     binStepBps,
@@ -354,7 +354,7 @@ export async function buildPoolCreationTransactions(
   const [holdersFeeVaultPda] = deriveVaultPda(poolPda, "holders_fee");
   const [nftFeeVaultPda] = deriveVaultPda(poolPda, "nft_fee");
 
-  const initVaultsData = coder.instruction.encode("initPoolVaults", {});
+  const initVaultsData = coder.instruction.encode("init_pool_vaults", {});
 
   const initVaultsIx = new TransactionInstruction({
     programId: PROGRAM_ID,

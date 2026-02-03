@@ -552,7 +552,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
     })
   );
 
-  // Build add_liquidity_v2 instruction
+  // Build add_liquidity_v2 instruction(s)
   const [baseVaultPda] = deriveVaultPda(poolPda, "base");
   const [quoteVaultPda] = deriveVaultPda(poolPda, "quote");
 
@@ -596,18 +596,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
     }
   }
 
-  // Convert to BN for Borsh encoding
-  const deposits = depositsRaw.map(d => ({
-    bin_index: new BN(d.bin_index),
-    base_in: new BN(d.base_in.toString()),
-    quote_in: new BN(d.quote_in.toString()),
-    min_shares_out: new BN(0), // No slippage protection for initial liquidity
-  }));
-
-  const addLiquidityData = coder.instruction.encode("add_liquidity_v2", {
-    deposits,
-  });
-
   // Derive owner's token accounts (ATAs)
   const [ownerBaseAta] = PublicKey.findProgramAddressSync(
     [adminPk.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), baseMintPk.toBuffer()],
@@ -619,22 +607,53 @@ export async function buildPoolCreationWithLiquidityTransactions(
     new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
   );
 
-  const addLiquidityIx = serializeInstruction(
-    new TransactionInstruction({
-      programId: PROGRAM_ID,
-      keys: [
-        { pubkey: poolPda, isSigner: false, isWritable: true },
-        { pubkey: adminPk, isSigner: true, isWritable: false },
-        { pubkey: ownerBaseAta, isSigner: false, isWritable: true },
-        { pubkey: ownerQuoteAta, isSigner: false, isWritable: true },
-        { pubkey: baseVaultPda, isSigner: false, isWritable: true },
-        { pubkey: quoteVaultPda, isSigner: false, isWritable: true },
-        { pubkey: positionPda, isSigner: false, isWritable: true },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+  // IMPORTANT: Split deposits into batches to avoid transaction size limit
+  // Each deposit is ~32 bytes (4 BN × 8 bytes). Solana tx limit is 1232 bytes.
+  // Safe batch size is ~15 deposits per transaction (480 bytes for deposits + overhead)
+  const BATCH_SIZE = 15;
+  const addLiquidityTransactions: Array<{ type: "add_liquidity"; instructions: SerializedInstruction[] }> = [];
+
+  for (let i = 0; i < depositsRaw.length; i += BATCH_SIZE) {
+    const batchDeposits = depositsRaw.slice(i, i + BATCH_SIZE);
+
+    // Convert to BN for Borsh encoding
+    const deposits = batchDeposits.map(d => ({
+      bin_index: new BN(d.bin_index),
+      base_in: new BN(d.base_in.toString()),
+      quote_in: new BN(d.quote_in.toString()),
+      min_shares_out: new BN(0), // No slippage protection for initial liquidity
+    }));
+
+    const addLiquidityData = coder.instruction.encode("add_liquidity_v2", {
+      deposits,
+    });
+
+    const addLiquidityIx = serializeInstruction(
+      new TransactionInstruction({
+        programId: PROGRAM_ID,
+        keys: [
+          { pubkey: poolPda, isSigner: false, isWritable: true },
+          { pubkey: adminPk, isSigner: true, isWritable: false },
+          { pubkey: ownerBaseAta, isSigner: false, isWritable: true },
+          { pubkey: ownerQuoteAta, isSigner: false, isWritable: true },
+          { pubkey: baseVaultPda, isSigner: false, isWritable: true },
+          { pubkey: quoteVaultPda, isSigner: false, isWritable: true },
+          { pubkey: positionPda, isSigner: false, isWritable: true },
+          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        ],
+        data: addLiquidityData,
+      })
+    );
+
+    addLiquidityTransactions.push({
+      type: "add_liquidity",
+      instructions: [
+        serializeInstruction(computeUnitLimitIx),
+        serializeInstruction(computeUnitPriceIx),
+        addLiquidityIx,
       ],
-      data: addLiquidityData,
-    })
-  );
+    });
+  }
 
   return {
     ...baseResult,
@@ -656,14 +675,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
           initPositionIx,
         ],
       },
-      {
-        type: "add_liquidity",
-        instructions: [
-          serializeInstruction(computeUnitLimitIx),
-          serializeInstruction(computeUnitPriceIx),
-          addLiquidityIx,
-        ],
-      },
+      ...addLiquidityTransactions,
     ],
     positionAddress: positionPda.toBase58(),
   };

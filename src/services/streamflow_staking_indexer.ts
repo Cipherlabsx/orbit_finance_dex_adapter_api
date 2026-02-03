@@ -672,52 +672,56 @@ export function startStreamflowStakingAggregator(opts: {
     for (const v of vaults) {
       if (stopped) break;
 
-      const addr = new PK(v.scan_address);
-      const subId = connection.onLogs(
-        { mentions: [addr] } as any,
-        async (ev) => {
-          try {
-            if (stopped) return;
+      try {
+        const addr = new PK(v.scan_address);
+        const subId = connection.onLogs(
+          addr,  // Pass PublicKey directly, not in mentions array
+          async (ev) => {
+            try {
+              if (stopped) return;
 
-            const sig = ev?.signature;
-            if (!sig) return;
+              const sig = ev?.signature;
+              if (!sig) return;
 
-            const st = stakeStore.byVaultId.get(v.id);
-            if (!st) return;
+              const st = stakeStore.byVaultId.get(v.id);
+              if (!st) return;
 
-            if (st.seenSigs.has(sig)) return;
+              if (st.seenSigs.has(sig)) return;
 
-            const tx = await connection.getTransaction(sig, TX_OPTS as any);
-            if (!tx) return;
+              const tx = await connection.getTransaction(sig, TX_OPTS as any);
+              if (!tx) return;
 
-            if (!txTouchesStakeProgram(tx, st.stakeProgram)) return;
+              if (!txTouchesStakeProgram(tx, st.stakeProgram)) return;
 
-            const deltas = computeOwnerDeltasLikeStakeJson(tx, st.tokenMint);
-            if (!deltas.size) return;
+              const deltas = computeOwnerDeltasLikeStakeJson(tx, st.tokenMint);
+              if (!deltas.size) return;
 
-            st.seenSigs.add(sig);
-            applyDeltasToStore(stakeStore, st, deltas);
+              st.seenSigs.add(sig);
+              applyDeltasToStore(stakeStore, st, deltas);
 
-            if (writeToDb) {
-              const txMeta: TransactionMetadata = {
-                signature: sig,
-                blockTime: tx.blockTime ?? null,
-                slot: tx.slot,
-              };
-              await writeEventsAndFlushVault(st, deltas, txMeta);
-            } else {
-              // don't let dirty sets grow if db writes disabled
-              st.dirtyOwners.clear();
-              st.dirtyTotals = false;
+              if (writeToDb) {
+                const txMeta: TransactionMetadata = {
+                  signature: sig,
+                  blockTime: tx.blockTime ?? null,
+                  slot: tx.slot,
+                };
+                await writeEventsAndFlushVault(st, deltas, txMeta);
+              } else {
+                // don't let dirty sets grow if db writes disabled
+                st.dirtyOwners.clear();
+                st.dirtyTotals = false;
+              }
+            } catch {
+              // keep alive
             }
-          } catch {
-            // keep alive
-          }
-        },
-        "finalized"
-      );
+          },
+          "finalized"
+        );
 
-      subs.push(subId);
+        subs.push(subId);
+      } catch (err) {
+        console.error(`[streamflow_staking] failed to subscribe to vault ${v.id} (${v.scan_address}):`, err);
+      }
     }
   };
 

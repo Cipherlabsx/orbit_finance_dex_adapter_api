@@ -30,6 +30,17 @@ type StakeRow = {
   updated_at?: string;
 };
 
+type EventRow = {
+  vault_id: number;
+  signature: string;
+  block_time: number;
+  slot: number;
+  owner: string;
+  delta_raw: string; // bigint-as-string
+  balance_after_raw: string; // bigint-as-string
+  processed_at?: string;
+};
+
 type VaultState = {
   // config
   id: number;
@@ -78,6 +89,12 @@ function txTouchesStakeProgram(tx: any, programId: string): boolean {
 }
 
 type OwnerDelta = Map<string, bigint>;
+
+type TransactionMetadata = {
+  signature: string;
+  blockTime: number | null;
+  slot: number;
+};
 
 function computeOwnerDeltasLikeStakeJson(tx: any, mint: string): OwnerDelta {
   const out: OwnerDelta = new Map();
@@ -236,6 +253,107 @@ async function hydrateVaultFromDb(store: StreamflowStakeStore, v: VaultRow) {
     m.set(v.id, raw);
     store.byOwner.set(owner, m);
   }
+
+  // Load seen signatures from events table to prevent reprocessing
+  const { data: eventsData, error: eventsError } = await supa
+    .from("streamflow_events")
+    .select("signature")
+    .eq("vault_id", v.id);
+
+  if (!eventsError) {
+    for (const e of eventsData ?? []) {
+      const sig = String((e as any).signature);
+      if (sig) st.seenSigs.add(sig);
+    }
+  }
+}
+
+/**
+ * Get the last processed event for a vault to detect where to resume from
+ */
+async function getLastProcessedEvent(vaultId: number): Promise<{ slot: number; blockTime: number } | null> {
+  const supa = await getSupa();
+  if (!supa) return null;
+
+  const { data, error } = await supa
+    .from("streamflow_events")
+    .select("slot, block_time")
+    .eq("vault_id", vaultId)
+    .order("slot", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[streamflow_staking] failed to get last event:", error.message ?? error);
+    return null;
+  }
+
+  if (!data) return null;
+
+  return {
+    slot: Number((data as any).slot),
+    blockTime: Number((data as any).block_time),
+  };
+}
+
+/**
+ * Fetch and process missing transactions since last processed event
+ */
+async function recoverMissingTransactions(
+  connection: Connection,
+  store: StreamflowStakeStore,
+  vault: VaultState,
+  scanAddress: string,
+  writeToDb: boolean
+): Promise<number> {
+  const lastEvent = await getLastProcessedEvent(vault.id);
+  const addr = new PK(scanAddress);
+
+  // Fetch signatures since last processed event (or last 100 if no events yet)
+  const limit = lastEvent ? 1000 : 100;
+  const sigInfos = await connection.getSignaturesForAddress(addr, { limit });
+
+  let processedCount = 0;
+
+  for (const sigInfo of sigInfos.reverse()) {
+    const sig = sigInfo.signature;
+    if (!sig) continue;
+
+    // Skip if already seen or if it's older than our last processed event
+    if (vault.seenSigs.has(sig)) continue;
+    if (lastEvent && sigInfo.slot && sigInfo.slot <= lastEvent.slot) continue;
+
+    try {
+      const tx = await connection.getTransaction(sig, TX_OPTS as any);
+      if (!tx) continue;
+
+      if (!txTouchesStakeProgram(tx, vault.stakeProgram)) continue;
+
+      const deltas = computeOwnerDeltasLikeStakeJson(tx, vault.tokenMint);
+      if (!deltas.size) continue;
+
+      vault.seenSigs.add(sig);
+      applyDeltasToStore(store, vault, deltas);
+
+      if (writeToDb) {
+        const txMeta: TransactionMetadata = {
+          signature: sig,
+          blockTime: tx.blockTime ?? null,
+          slot: tx.slot,
+        };
+        await writeEventsAndFlushVault(vault, deltas, txMeta);
+      }
+
+      processedCount++;
+    } catch (err) {
+      console.error(`[streamflow_staking] failed to process tx ${sig}:`, err);
+    }
+
+    // Rate limit
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  return processedCount;
 }
 
 function applyDeltasToStore(store: StreamflowStakeStore, vault: VaultState, deltas: OwnerDelta) {
@@ -279,7 +397,11 @@ function applyDeltasToStore(store: StreamflowStakeStore, vault: VaultState, delt
   }
 }
 
-async function flushVaultNow(vault: VaultState) {
+async function writeEventsAndFlushVault(
+  vault: VaultState,
+  deltas: OwnerDelta,
+  txMeta: TransactionMetadata
+) {
   const supa = await getSupa();
   if (!supa) {
     console.log("[streamflow_staking] no supa client (missing SUPABASE_URL / SERVICE_ROLE_KEY)");
@@ -290,7 +412,39 @@ async function flushVaultNow(vault: VaultState) {
   }
 
   const nowIso = new Date().toISOString();
+  const blockTime = txMeta.blockTime ?? Math.floor(Date.now() / 1000);
 
+  // 1. Write events (immutable audit trail)
+  const events: EventRow[] = [];
+  for (const [owner, delta] of deltas.entries()) {
+    if (delta === 0n) continue;
+
+    const balanceAfter = vault.byOwner.get(owner) ?? 0n;
+    events.push({
+      vault_id: vault.id,
+      signature: txMeta.signature,
+      block_time: blockTime,
+      slot: txMeta.slot,
+      owner,
+      delta_raw: delta.toString(),
+      balance_after_raw: balanceAfter.toString(),
+      processed_at: nowIso,
+    });
+  }
+
+  if (events.length) {
+    const { error } = await supa
+      .from("streamflow_events")
+      .insert(events);
+    if (error) {
+      // If duplicate, it's fine (idempotency)
+      if (!error.message?.includes("duplicate") && !error.message?.includes("unique")) {
+        console.error("[streamflow_staking] event insert failed:", error.message ?? error);
+      }
+    }
+  }
+
+  // 2. Update current stakes (state table)
   const upserts: StakeRow[] = [];
   const deletes: string[] = [];
 
@@ -325,6 +479,7 @@ async function flushVaultNow(vault: VaultState) {
     if (error) console.error("[streamflow_staking] stake delete failed:", error.message ?? error);
   }
 
+  // 3. Update vault totals
   if (vault.dirtyTotals) {
     vault.dirtyTotals = false;
     const { error } = await supa
@@ -382,6 +537,91 @@ export function getOwnerStreamflowStakes(store: StreamflowStakeStore, owner: str
   return out;
 }
 
+/**
+ * Query historical events for an owner from the database
+ */
+export async function getOwnerStreamflowEvents(opts: {
+  owner: string;
+  vaultId?: number;
+  limit?: number;
+  offset?: number;
+}) {
+  const supa = await getSupa();
+  if (!supa) return [];
+
+  let query = supa
+    .from("streamflow_events")
+    .select("vault_id, signature, block_time, slot, owner, delta_raw, balance_after_raw, processed_at")
+    .eq("owner", opts.owner)
+    .order("block_time", { ascending: false });
+
+  if (opts.vaultId !== undefined) {
+    query = query.eq("vault_id", opts.vaultId);
+  }
+
+  if (opts.limit !== undefined) {
+    query = query.limit(opts.limit);
+  }
+
+  if (opts.offset !== undefined) {
+    query = query.range(opts.offset, opts.offset + (opts.limit ?? 100) - 1);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    console.error("[streamflow_staking] failed to query events:", error.message ?? error);
+    return [];
+  }
+
+  return (data ?? []).map((e: any) => ({
+    vaultId: Number(e.vault_id),
+    signature: String(e.signature),
+    blockTime: Number(e.block_time),
+    slot: Number(e.slot),
+    owner: String(e.owner),
+    deltaRaw: String(e.delta_raw),
+    balanceAfterRaw: String(e.balance_after_raw),
+    processedAt: String(e.processed_at),
+  }));
+}
+
+/**
+ * Get event statistics for a vault
+ */
+export async function getVaultEventStats(vaultId: number) {
+  const supa = await getSupa();
+  if (!supa) return null;
+
+  const { data, error } = await supa
+    .from("streamflow_events")
+    .select("slot, block_time")
+    .eq("vault_id", vaultId)
+    .order("slot", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[streamflow_staking] failed to get vault stats:", error.message ?? error);
+    return null;
+  }
+
+  if (!data) {
+    return { lastSlot: null, lastBlockTime: null, eventCount: 0 };
+  }
+
+  const countResult = await supa
+    .from("streamflow_events")
+    .select("*", { count: "exact", head: true })
+    .eq("vault_id", vaultId);
+
+  return {
+    lastSlot: Number((data as any).slot),
+    lastBlockTime: Number((data as any).block_time),
+    eventCount: countResult.count ?? 0,
+  };
+}
+
 // main service
 export function startStreamflowStakingAggregator(opts: {
   connection: Connection;
@@ -400,6 +640,32 @@ export function startStreamflowStakingAggregator(opts: {
     for (const v of vaults) {
       ensureVaultState(stakeStore, v);
       await hydrateVaultFromDb(stakeStore, v);
+    }
+
+    // recover any missing transactions since last boot
+    if (writeToDb) {
+      console.log("[streamflow_staking] checking for missing transactions...");
+      for (const v of vaults) {
+        if (stopped) break;
+        const vault = stakeStore.byVaultId.get(v.id);
+        if (!vault) continue;
+
+        try {
+          const recovered = await recoverMissingTransactions(
+            connection,
+            stakeStore,
+            vault,
+            v.scan_address,
+            writeToDb
+          );
+          if (recovered > 0) {
+            console.log(`[streamflow_staking] vault ${v.id}: recovered ${recovered} missing transactions`);
+          }
+        } catch (err) {
+          console.error(`[streamflow_staking] vault ${v.id}: recovery failed:`, err);
+        }
+      }
+      console.log("[streamflow_staking] recovery complete");
     }
 
     // subscribe per vault scan address
@@ -433,7 +699,12 @@ export function startStreamflowStakingAggregator(opts: {
             applyDeltasToStore(stakeStore, st, deltas);
 
             if (writeToDb) {
-              await flushVaultNow(st);
+              const txMeta: TransactionMetadata = {
+                signature: sig,
+                blockTime: tx.blockTime ?? null,
+                slot: tx.slot,
+              };
+              await writeEventsAndFlushVault(st, deltas, txMeta);
             } else {
               // don't let dirty sets grow if db writes disabled
               st.dirtyOwners.clear();

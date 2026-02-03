@@ -114,22 +114,56 @@ async function resolveVaultId(supa: any): Promise<number> {
   return Number(data.id);
 }
 
+type EventRow = {
+  vault_id: number;
+  signature: string;
+  block_time: number;
+  slot: number;
+  owner: string;
+  delta_raw: string;
+  balance_after_raw: string;
+  processed_at?: string;
+};
+
 async function replaceSnapshotInDb(opts: {
   vaultId: number;
   rows: Array<{ owner: string; staked_raw: string }>;
+  events: EventRow[];
   holdersCount: string;
   totalStakedRaw: string;
 }) {
   const supa = await getSupa();
   const nowIso = new Date().toISOString();
 
-  // delete existing for vault
+  // 1. Delete existing events and stakes for vault
+  console.log("Clearing old events and stakes...");
+  {
+    const { error } = await supa.from("streamflow_events").delete().eq("vault_id", opts.vaultId);
+    if (error) throw error;
+  }
   {
     const { error } = await supa.from("streamflow_stakes").delete().eq("vault_id", opts.vaultId);
     if (error) throw error;
   }
 
-  // upsert new snapshot (batched)
+  // 2. Insert events (batched)
+  console.log(`Inserting ${opts.events.length} events...`);
+  for (let i = 0; i < opts.events.length; i += UPSERT_BATCH) {
+    const chunk = opts.events.slice(i, i + UPSERT_BATCH).map((e) => ({
+      ...e,
+      processed_at: nowIso,
+    }));
+
+    const { error } = await supa.from("streamflow_events").insert(chunk);
+    if (error) throw error;
+
+    if (i > 0 && i % 2000 === 0) {
+      console.log(`  events: ${i}/${opts.events.length}`);
+    }
+  }
+
+  // 3. Upsert current stakes snapshot (batched)
+  console.log(`Inserting ${opts.rows.length} stake balances...`);
   for (let i = 0; i < opts.rows.length; i += UPSERT_BATCH) {
     const chunk = opts.rows.slice(i, i + UPSERT_BATCH).map((r) => ({
       vault_id: opts.vaultId,
@@ -145,7 +179,7 @@ async function replaceSnapshotInDb(opts: {
     if (error) throw error;
   }
 
-  // update totals on vault row
+  // 4. Update totals on vault row
   {
     const { error } = await supa
       .from("streamflow_vaults")
@@ -195,6 +229,7 @@ async function main() {
 
   // fetch transactions & aggregate
   const ownerToStakedRaw = new Map<string, bigint>();
+  const allEvents: EventRow[] = [];
   let scanned = 0;
   let used = 0;
   let missing = 0;
@@ -218,7 +253,7 @@ async function main() {
       })
     );
 
-    for (const { tx } of txs) {
+    for (const { sig, tx } of txs) {
       scanned++;
       if (!tx) {
         missing++;
@@ -227,12 +262,37 @@ async function main() {
       if (!txTouchesStreamflowStake(tx)) continue;
 
       used++;
-      accumulateCipherDeltasByOwner(tx, ownerToStakedRaw);
+
+      // Compute deltas for this transaction
+      const ownerToDelta = new Map<string, bigint>();
+      accumulateCipherDeltasByOwner(tx, ownerToDelta);
+
+      // Apply deltas to cumulative state
+      for (const [owner, delta] of ownerToDelta.entries()) {
+        ownerToStakedRaw.set(owner, (ownerToStakedRaw.get(owner) ?? 0n) + delta);
+      }
+
+      // Record events with balance after each transaction
+      const blockTime = tx.blockTime ?? Math.floor(Date.now() / 1000);
+      for (const [owner, delta] of ownerToDelta.entries()) {
+        if (delta === 0n) continue;
+
+        const balanceAfter = ownerToStakedRaw.get(owner) ?? 0n;
+        allEvents.push({
+          vault_id: 0, // will be set later
+          signature: sig,
+          block_time: blockTime,
+          slot: tx.slot,
+          owner,
+          delta_raw: delta.toString(),
+          balance_after_raw: balanceAfter.toString(),
+        });
+      }
     }
 
     if ((i / TX_BATCH) % 20 === 0) {
       console.log(
-        `progress: ${Math.min(i + TX_BATCH, sigs.length)}/${sigs.length} | scanned=${scanned} used=${used} missing=${missing} | owners=${ownerToStakedRaw.size}`
+        `progress: ${Math.min(i + TX_BATCH, sigs.length)}/${sigs.length} | scanned=${scanned} used=${used} missing=${missing} | owners=${ownerToStakedRaw.size} events=${allEvents.length}`
       );
     }
 
@@ -257,6 +317,7 @@ async function main() {
 
   console.log("Computed owners:", rows.length);
   console.log("Computed totalRaw:", totalRaw.toString());
+  console.log("Computed events:", allEvents.length);
 
   // push snapshot to DB
   const supa = await getSupa();
@@ -264,15 +325,21 @@ async function main() {
 
   console.log("DB vault_id:", vaultId);
 
+  // Set vault_id on all events
+  for (const event of allEvents) {
+    event.vault_id = vaultId;
+  }
+
   await replaceSnapshotInDb({
     vaultId,
     rows,
+    events: allEvents,
     holdersCount: String(rows.length),
     totalStakedRaw: totalRaw.toString(),
   });
 
-  console.log("DB snapshot replaced");
-  console.log("stats:", { signatures: sigs.length, scanned, used, missing });
+  console.log("DB snapshot and events replaced");
+  console.log("stats:", { signatures: sigs.length, scanned, used, missing, events: allEvents.length });
 }
 
 main().catch((e) => {

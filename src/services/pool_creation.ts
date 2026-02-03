@@ -102,7 +102,7 @@ export type SerializedInstruction = {
 /**
  * Allowed bin step values (in basis points)
  */
-const ALLOWED_BIN_STEPS = [1, 5, 10, 25, 50, 100];
+const ALLOWED_BIN_STEPS = [1, 5, 10, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500];
 
 /**
  * Validates that mints are in canonical order (base < quote lexicographically)
@@ -561,7 +561,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const quoteAmountRaw = BigInt(Math.floor(parseFloat(quoteAmount) * 10 ** quoteDecimals));
 
   // Build deposits array - distribute evenly across bins
-  const depositsRaw: Array<{ bin_index: number; amount: bigint }> = [];
+  // IDL expects: { bin_index: u64, base_in: u64, quote_in: u64, min_shares_out: u64 }
+  const depositsRaw: Array<{ bin_index: number; base_in: bigint; quote_in: bigint }> = [];
   const totalBins = upperBinIndex - lowerBinIndex + 1;
 
   // Simple uniform distribution strategy
@@ -569,23 +570,38 @@ export async function buildPoolCreationWithLiquidityTransactions(
     const baseShare = baseAmountRaw / BigInt(totalBins);
     const quoteShare = quoteAmountRaw / BigInt(totalBins);
 
-    // For bins below active: only base token
-    // For bins above active: only quote token
-    // Active bin: both tokens
-    if (binIndex < activeBin && baseShare > 0n) {
-      depositsRaw.push({ bin_index: binIndex, amount: baseShare });
-    } else if (binIndex > activeBin && quoteShare > 0n) {
-      depositsRaw.push({ bin_index: binIndex, amount: quoteShare });
-    } else if (binIndex === activeBin) {
-      if (baseShare > 0n) depositsRaw.push({ bin_index: binIndex, amount: baseShare });
-      if (quoteShare > 0n) depositsRaw.push({ bin_index: binIndex, amount: quoteShare });
+    // Distribute liquidity based on bin position relative to active bin
+    // - Bins below active: only base tokens
+    // - Bins above active: only quote tokens
+    // - Active bin: both tokens
+    if (binIndex < activeBin) {
+      // Below active: only base
+      if (baseShare > 0n) {
+        depositsRaw.push({ bin_index: binIndex, base_in: baseShare, quote_in: 0n });
+      }
+    } else if (binIndex > activeBin) {
+      // Above active: only quote
+      if (quoteShare > 0n) {
+        depositsRaw.push({ bin_index: binIndex, base_in: 0n, quote_in: quoteShare });
+      }
+    } else {
+      // Active bin: both tokens
+      if (baseShare > 0n || quoteShare > 0n) {
+        depositsRaw.push({
+          bin_index: binIndex,
+          base_in: baseShare > 0n ? baseShare : 0n,
+          quote_in: quoteShare > 0n ? quoteShare : 0n
+        });
+      }
     }
   }
 
-  // Convert bigint amounts to BN for Borsh encoding
+  // Convert to BN for Borsh encoding
   const deposits = depositsRaw.map(d => ({
-    bin_index: d.bin_index,
-    amount: new BN(d.amount.toString()),
+    bin_index: new BN(d.bin_index),
+    base_in: new BN(d.base_in.toString()),
+    quote_in: new BN(d.quote_in.toString()),
+    min_shares_out: new BN(0), // No slippage protection for initial liquidity
   }));
 
   const addLiquidityData = coder.instruction.encode("add_liquidity_v2", {

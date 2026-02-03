@@ -14,13 +14,12 @@
 import {
   PublicKey,
   TransactionInstruction,
-  Keypair,
   SystemProgram,
   SYSVAR_RENT_PUBKEY,
   ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
-import { BorshCoder, type Instruction } from "@coral-xyz/anchor";
+import { BorshCoder } from "@coral-xyz/anchor";
 import { ORBIT_IDL } from "../idl/coder.js";
 import { PROGRAM_ID } from "../solana.js";
 
@@ -49,6 +48,7 @@ export type PoolCreationParams = {
   creator: string;               // Pool creator (receives creator fee split)
   baseMint: string;              // Base token mint
   quoteMint: string;             // Quote token mint
+  lpMintPublicKey: string;       // SECURITY: Client-generated LP mint public key (frontend generates and signs)
   binStepBps: number;            // Bin step in basis points (1, 5, 10, 25, 50, 100)
   initialPrice: number;          // Initial price as decimal (e.g., 6.35 for CIPHER/USDC)
   baseDecimals: number;          // Base token decimals
@@ -60,6 +60,9 @@ export type PoolCreationParams = {
 
 /**
  * Result of pool creation transaction building
+ *
+ * SECURITY: Only returns public keys, never secret keys
+ * The frontend generates the LP mint keypair locally and signs transactions
  */
 export type PoolCreationResult = {
   transactions: Array<{
@@ -67,10 +70,7 @@ export type PoolCreationResult = {
     instructions: SerializedInstruction[];
   }>;
   poolAddress: string;
-  lpMintKeypair: {
-    publicKey: string;
-    secretKey: string; // Base58-encoded secret key for frontend signing
-  };
+  lpMintPublicKey: string; // SECURITY: Only public key returned
   registryAddress: string;
 };
 
@@ -262,12 +262,13 @@ function serializeInstruction(ix: TransactionInstruction): SerializedInstruction
  * 1. init_pool: Creates pool state, LP mint, and registry
  * 2. init_pool_vaults: Creates token vaults for pool
  *
- * Security notes:
+ * SECURITY:
  * - Validates all inputs before building transactions
  * - Returns unsigned transactions (frontend must sign)
- * - LP mint keypair generated server-side but returned to frontend
+ * - LP mint keypair generated CLIENT-SIDE (frontend only sends public key)
  * - Frontend must sign tx1 with both admin + lpMint keypairs
  * - Frontend must sign tx2 with admin keypair only
+ * - Secret keys NEVER transmitted over network
  */
 export async function buildPoolCreationTransactions(
   params: PoolCreationParams
@@ -277,6 +278,7 @@ export async function buildPoolCreationTransactions(
     creator,
     baseMint,
     quoteMint,
+    lpMintPublicKey,
     binStepBps,
     initialPrice,
     baseDecimals,
@@ -308,8 +310,8 @@ export async function buildPoolCreationTransactions(
   const [poolPda] = derivePoolPda(baseMintPk, quoteMintPk);
   const [registryPda] = deriveRegistryPda(baseMintPk, quoteMintPk);
 
-  // Generate LP mint keypair (will be signed by frontend)
-  const lpMintKeypair = Keypair.generate();
+  // SECURITY: Use client-provided LP mint public key (keypair generated on client)
+  const lpMintPk = new PublicKey(lpMintPublicKey);
 
   // Build init_pool instruction
   const coder = new BorshCoder(ORBIT_IDL);
@@ -337,7 +339,7 @@ export async function buildPoolCreationTransactions(
       { pubkey: baseMintPk, isSigner: false, isWritable: false },
       { pubkey: quoteMintPk, isSigner: false, isWritable: false },
       { pubkey: poolPda, isSigner: false, isWritable: true },
-      { pubkey: lpMintKeypair.publicKey, isSigner: true, isWritable: true },
+      { pubkey: lpMintPk, isSigner: true, isWritable: true },
       { pubkey: registryPda, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
@@ -398,10 +400,7 @@ export async function buildPoolCreationTransactions(
       },
     ],
     poolAddress: poolPda.toBase58(),
-    lpMintKeypair: {
-      publicKey: lpMintKeypair.publicKey.toBase58(),
-      secretKey: Buffer.from(lpMintKeypair.secretKey).toString("base64"),
-    },
+    lpMintPublicKey: lpMintPk.toBase58(), // SECURITY: Only public key, never secret
     registryAddress: registryPda.toBase58(),
   };
 }

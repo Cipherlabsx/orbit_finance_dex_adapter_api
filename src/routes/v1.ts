@@ -9,7 +9,7 @@ import { readPair } from "../services/pairs.js";
 import { readEventsBySlotRange, readLatestBlock } from "../services/events.js";
 import { verifyWsTicket, mintWsTicket } from "../services/ws_auth.js";
 import { getPoolVolumesAll } from "../services/volume_aggregator.js";
-import { getCandles, getCandlesBundle } from "../services/candle_aggregator.js";
+import { getCandles } from "../services/candle_aggregator.js";
 import { getOwnerStreamflowStakes, listStreamflowVaults } from "../services/streamflow_staking_indexer.js";
 import { dbListPools, dbGetPool } from "../services/pool_db.js";
 import { dbListTokens, dbGetToken } from "../services/token_registry.js";
@@ -330,6 +330,7 @@ export async function v1Routes(app: FastifyInstance) {
       creator: z.string().length(44),
       baseMint: z.string().length(44),
       quoteMint: z.string().length(44),
+      lpMintPublicKey: z.string().length(44), // SECURITY: Client-generated, only public key
       binStepBps: z.number().int().refine((v) => [1, 5, 10, 25, 50, 100].includes(v), {
         message: "binStepBps must be one of: 1, 5, 10, 25, 50, 100",
       }),
@@ -381,6 +382,7 @@ export async function v1Routes(app: FastifyInstance) {
         creator: body.creator,
         baseMint: body.baseMint,
         quoteMint: body.quoteMint,
+        lpMintPublicKey: body.lpMintPublicKey, // SECURITY: Client-generated public key
         binStepBps: body.binStepBps,
         initialPrice: body.initialPrice,
         baseDecimals: baseToken.decimals,
@@ -755,4 +757,45 @@ export async function v1Routes(app: FastifyInstance) {
       return { error: "calculation_failed", message: errorMessage };
     }
   });
+
+// GET /api/v1/tokens/prices?mints=mint1,mint2
+// Reads token_registry.price_usd + last_price_update from DB.
+app.get("/tokens/prices", async (req, reply) => {
+  const q = z
+    .object({
+      mints: z.string().optional(),
+    })
+    .parse((req.query ?? {}) as any);
+
+  if (!q.mints) {
+    reply.code(400);
+    return { error: "mints_required", message: "Provide comma-separated mints" };
+  }
+
+  const mints = q.mints
+    .split(",")
+    .map((m) => m.trim())
+    .filter((m) => m.length >= 32);
+
+  if (mints.length === 0) {
+    reply.code(400);
+    return { error: "invalid_mints" };
+  }
+
+  const rows = await Promise.all(mints.map((m) => dbGetToken(m)));
+
+  const prices = rows
+    .map((t, i) => {
+      const mint = mints[i]!;
+      if (!t) return { mint, priceUsd: null, lastUpdated: null };
+      return {
+        mint: t.mint,
+        priceUsd: t.priceUsd ?? null,
+        lastUpdated: t.lastPriceUpdate ? new Date(t.lastPriceUpdate).getTime() : null,
+      };
+    });
+
+  reply.header("cache-control", "public, max-age=1"); // tiny cache, you poll anyway
+  return { prices, ts: Date.now() };
+});
 }

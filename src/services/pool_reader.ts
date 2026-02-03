@@ -166,6 +166,29 @@ function toUi(atomsStr: string, decimals: number): number {
   }
 }
 
+function asU128(x: any, label: string): bigint {
+  if (x == null) throw new Error(`${label}_missing`);
+
+  // Anchor / bytemuck u128 often decodes as BN-like
+  if (typeof x === "bigint") return x;
+
+  if (typeof x === "number") {
+    if (!Number.isSafeInteger(x)) throw new Error(`${label}_unsafe_number`);
+    return BigInt(x);
+  }
+
+  if (typeof x === "string") {
+    return BigInt(x);
+  }
+
+  // BN.js style
+  if (typeof x?.toString === "function") {
+    return BigInt(x.toString());
+  }
+
+  throw new Error(`${label}_invalid_u128`);
+}
+
 /**
  * Convert atoms-price (quoteAtoms/baseAtoms) -> UI price (quoteUi/baseUi).
  * priceUi = priceAtoms * 10^(baseDecimals - quoteDecimals)
@@ -197,8 +220,8 @@ export async function readPool(pool: string): Promise<PoolView> {
   const nftFeeVaultPk = pick<any>(raw, ["nftFeeVault", "nft_fee_vault"]);
 
   // q64.64 price (atoms-price: quoteAtoms/baseAtoms)
-  const priceVal = pick<any>(raw, ["priceQ6464", "priceQ64_64", "price_q64_64"]);
-  const priceQ64 = BigInt(asU64String(priceVal, "price_q64_64"));
+  const priceVal = pick<any>(raw, ["price_q64_64"]);
+  const priceQ64 = asU128(priceVal, "price_q64_64");
   const priceAtoms = safeNumber(priceQ64) === null ? null : Number(priceQ64) / 2 ** 64;
   const activeBin = asNumberI32(pick(raw, ["activeBinId", "active_bin_id", "activeBin", "active_bin"])!, "active_bin");
   const initialBin = asNumberI32(pick(raw, ["initialBinId", "initial_bin_id"])!, "initial_bin_id");
@@ -278,10 +301,8 @@ export async function readPool(pool: string): Promise<PoolView> {
 export async function readBins(pool: string, opts?: { radius?: number; limit?: number }): Promise<BinsView> {
   const radius = Math.max(10, Math.min(2000, Math.trunc(opts?.radius ?? 300)));
   const limit = Math.max(20, Math.min(4000, Math.trunc(opts?.limit ?? (radius * 2 + 1))));
-
   const poolView = await readPool(pool);
   const poolPk = pk(pool);
-
   const activeBin = poolView.activeBin;
   const startBin = activeBin - radius;
   const endBin = activeBin + radius;

@@ -1,18 +1,16 @@
-// Responsibilities:
-// 1) Subscribe to on-chain program logs (connection.onLogs)
-// 2) Fetch transaction, decode Anchor events (debug/audit trail)
-// 3) Derive a swap Trade (market data) + persist dex_trades
-// 4) Persist dex_events WITH txn_index + event_index
-//    - "swap" event_data is Gecko-ready (priceNative/reserves/amounts)
-//
-
 import type { Connection, PublicKey, VersionedTransactionResponse } from "@solana/web3.js";
 
 import type { TradeStore, Trade } from "./trades_indexer.js";
 import { deriveTradeFromTransaction } from "./trade_derivation.js";
 import { readPool } from "./pool_reader.js";
 import { decodeEventsFromLogs } from "../idl/coder.js";
-import { updateDexPoolLiveState, updateDexPoolLiquidityState, upsertDexPool, writeDexEvent, writeDexTrade } from "../supabase.js";
+import {
+  updateDexPoolLiveState,
+  updateDexPoolLiquidityState,
+  upsertDexPool,
+  writeDexEvent,
+  writeDexTrade,
+} from "../supabase.js";
 import type { WsHub } from "./ws.js";
 import { formatEventData, getStandardEventType } from "./event_formatters.js";
 
@@ -24,54 +22,40 @@ type AnchorEvent = {
   data?: JsonObject | null;
 };
 
+type TokenBalanceLike = {
+  accountIndex?: number;
+  uiTokenAmount?: { amount?: string };
+};
+
+type AccountKeyLike = PublicKey | string | { pubkey: PublicKey };
+
 const LIQ_EVENT_NAMES = new Set([
+  "LiquidityDeposited",
   "LiquidityWithdrawnUser",
-  "LiquidityDepositedUser",
-  "LiquidityAddedUser",
-  "LiquidityRemovedUser",
+  "LiquidityWithdrawnAdmin",
+  "LiquidityLocked",
 ]);
 
-/**
- * Best-effort: determine pool/pair id from arbitrary event payload.
- * (This is helpful for WS routing and optional debugging.)
- */
+// Helpers
+function isSwapEventName(name: string): boolean {
+  return name === "SwapExecuted";
+}
+
 function poolFromEventData(data: JsonObject | null | undefined): string | null {
   if (!data) return null;
-
-  const pool = data["pool"];
-  const pairId = data["pairId"];
-  const poolId = data["poolId"];
-
-  if (typeof pool === "string") return pool;
-  if (typeof pairId === "string") return pairId;
-  if (typeof poolId === "string") return poolId;
-
+  if (typeof data.pool === "string") return data.pool;
+  if (typeof data.pairId === "string") return data.pairId;
+  if (typeof data.poolId === "string") return data.poolId;
   return null;
 }
 
-/**
- * Decimalize bigint atoms into a decimal string.
- * - No rounding
- * - Trims trailing zeros
- */
-function decimalize(atoms: bigint, decimals: number): string {
-  const sign = atoms < 0n ? "-" : "";
-  const x = atoms < 0n ? -atoms : atoms;
-  const base = 10n ** BigInt(decimals);
-  const whole = x / base;
-  const frac = x % base;
-  const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
-  return fracStr.length ? `${sign}${whole.toString()}.${fracStr}` : `${sign}${whole.toString()}`;
+function firstPoolFromDecodedEvents(decoded: AnchorEvent[]): string | null {
+  for (const evt of decoded) {
+    const p = poolFromEventData(evt.data ?? null);
+    if (p) return p;
+  }
+  return null;
 }
-
-/**
- * Decimalize bigint atoms into a decimal string.
- * - No rounding
- * - Trims trailing zeros
- */
-
-type TokenBalanceLike = { accountIndex?: number; uiTokenAmount?: { amount?: string } };
-type AccountKeyLike = PublicKey | string | { pubkey: PublicKey };
 
 function keyToString(k: AccountKeyLike | null): string | null {
   if (!k) return null;
@@ -80,46 +64,24 @@ function keyToString(k: AccountKeyLike | null): string | null {
   return k.toBase58();
 }
 
-function computeLiquidityQuoteFromPostBalances(args: {
-  tx: VersionedTransactionResponse;
-  poolView: Awaited<ReturnType<typeof readPool>>;
-}): number | null {
-  const { tx, poolView } = args;
-
-  const post = getPostVaultReservesAtoms(tx, poolView);
-  if (!post) return null;
-
-  // convert atoms -> ui using decimals (no extra RPC)
-  const baseUi = Number(post.base) / (10 ** poolView.baseDecimals);
-  const quoteUi = Number(post.quote) / (10 ** poolView.quoteDecimals);
-
-  const px = poolView.priceNumber;
-  if (px == null || !Number.isFinite(px) || px <= 0) return null;
-
-  const liq = quoteUi + baseUi * px;
-  return Number.isFinite(liq) ? liq : null;
-}
-
 function getAllAccountKeys(tx: VersionedTransactionResponse): AccountKeyLike[] {
   const msg = tx.transaction.message;
 
-  // legacy
   if ("accountKeys" in msg) {
     return msg.accountKeys as AccountKeyLike[];
   }
 
-  // v0
-  const staticKeys = msg.staticAccountKeys as PublicKey[];
-  const loadedWritable = (tx.meta?.loadedAddresses?.writable ?? []) as PublicKey[];
-  const loadedReadonly = (tx.meta?.loadedAddresses?.readonly ?? []) as PublicKey[];
-
-  return [...staticKeys, ...loadedWritable, ...loadedReadonly];
+  return [
+    ...msg.staticAccountKeys,
+    ...(tx.meta?.loadedAddresses?.writable ?? []),
+    ...(tx.meta?.loadedAddresses?.readonly ?? []),
+  ];
 }
 
 function findAccountIndex(tx: VersionedTransactionResponse, address: string): number {
   const keys = getAllAccountKeys(tx);
   for (let i = 0; i < keys.length; i++) {
-    if (keyToString(keys[i] ?? null) === address) return i;
+    if (keyToString(keys[i]) === address) return i;
   }
   return -1;
 }
@@ -127,22 +89,15 @@ function findAccountIndex(tx: VersionedTransactionResponse, address: string): nu
 function toAmountMap(balances: readonly TokenBalanceLike[] | null | undefined): Map<number, bigint> {
   const m = new Map<number, bigint>();
   for (const b of balances ?? []) {
-    const idx = Number(b.accountIndex);
-    const raw = b.uiTokenAmount?.amount;
-    if (!Number.isFinite(idx) || typeof raw !== "string") continue;
+    if (typeof b.accountIndex !== "number") continue;
+    if (typeof b.uiTokenAmount?.amount !== "string") continue;
     try {
-      m.set(idx, BigInt(raw));
-    } catch {
-      /* ignore */
-    }
+      m.set(b.accountIndex, BigInt(b.uiTokenAmount.amount));
+    } catch {}
   }
   return m;
 }
 
-/**
- * Compute vault reserves AFTER this tx from tx.meta.postTokenBalances.
- * This is the most correct "post-event reserves" available to an indexer.
- */
 function getPostVaultReservesAtoms(
   tx: VersionedTransactionResponse,
   poolView: Awaited<ReturnType<typeof readPool>>
@@ -154,7 +109,6 @@ function getPostVaultReservesAtoms(
   if (baseIdx < 0 || quoteIdx < 0) return null;
 
   const post = toAmountMap(tx.meta.postTokenBalances as any);
-
   const basePost = post.get(baseIdx);
   const quotePost = post.get(quoteIdx);
   if (basePost == null || quotePost == null) return null;
@@ -162,149 +116,39 @@ function getPostVaultReservesAtoms(
   return { base: basePost, quote: quotePost };
 }
 
-/**
- * Strict decimal division to string without floating point.
- * Computes (num / den) as a decimal string with up to `scale` fractional digits.
- * Trims trailing zeros.
- */
-function divToDecimalString(num: bigint, den: bigint, scale = 50): string | null {
-  if (den === 0n) return null;
-  if (num === 0n) return "0";
-
-  const sign = (num < 0n) !== (den < 0n) ? "-" : "";
-  const n = num < 0n ? -num : num;
-  const d = den < 0n ? -den : den;
-
-  const whole = n / d;
-  let rem = n % d;
-
-  if (rem === 0n) return sign + whole.toString();
-
-  let frac = "";
-  for (let i = 0; i < scale && rem !== 0n; i++) {
-    rem *= 10n;
-    const digit = rem / d;
-    rem = rem % d;
-    frac += digit.toString();
-  }
-
-  frac = frac.replace(/0+$/, "");
-  return frac.length ? `${sign}${whole.toString()}.${frac}` : sign + whole.toString();
-}
-
-/**
- * Build swap payload from:
- * - derived Trade (amounts + direction)
- * - poolView (mints/decimals/reserves/price)
- */
-function buildSwapEventData(args: {
+function computeLiquidityQuoteFromPostBalances(args: {
   tx: VersionedTransactionResponse;
-  trade: Trade;
   poolView: Awaited<ReturnType<typeof readPool>>;
-}) {
-  const { tx, trade, poolView } = args;
+}): number | null {
+  const post = getPostVaultReservesAtoms(args.tx, args.poolView);
+  if (!post) return null;
 
-  // Need derived amounts + mints
-  if (!trade.amountIn || !trade.amountOut || !trade.inMint || !trade.outMint) return null;
+  const baseUi = Number(post.base) / 10 ** args.poolView.baseDecimals;
+  const quoteUi = Number(post.quote) / 10 ** args.poolView.quoteDecimals;
+  const px = args.poolView.priceNumber;
+  if (!Number.isFinite(px) || px! <= 0) return null;
 
-  // Need reserves from tx meta (post state)
-  const postRes = getPostVaultReservesAtoms(tx, poolView);
-  if (!postRes) return null;
-
-  const reserves = {
-    // asset0=base, asset1=quote
-    asset0: decimalize(postRes.base, poolView.baseDecimals),
-    asset1: decimalize(postRes.quote, poolView.quoteDecimals),
-  };
-
-  // amounts (decimalized) per rule:
-  // either (asset0In + asset1Out) OR (asset1In + asset0Out)
-  let asset0In: string | undefined;
-  let asset1In: string | undefined;
-  let asset0Out: string | undefined;
-  let asset1Out: string | undefined;
-
-  const inAtoms = BigInt(trade.amountIn);
-  const outAtoms = BigInt(trade.amountOut);
-
-  // Define asset0=base, asset1=quote
-  if (trade.inMint === poolView.baseMint && trade.outMint === poolView.quoteMint) {
-    asset0In = decimalize(inAtoms, poolView.baseDecimals);
-    asset1Out = decimalize(outAtoms, poolView.quoteDecimals);
-
-    // priceNative = amount(asset1) / amount(asset0)
-    // Use atoms with decimal adjustment to avoid float:
-    // price = (outAtoms / 10^quoteDec) / (inAtoms / 10^baseDec)
-    //       = outAtoms * 10^baseDec / (inAtoms * 10^quoteDec)
-    const num = outAtoms * 10n ** BigInt(poolView.baseDecimals);
-    const den = inAtoms * 10n ** BigInt(poolView.quoteDecimals);
-    const priceNative = divToDecimalString(num, den, 50);
-    if (!priceNative || priceNative === "0") return null;
-
-    return {
-      maker: trade.user ?? "11111111111111111111111111111111",
-      pairId: trade.pool,
-      asset0In,
-      asset1Out,
-      priceNative,
-      reserves,
-    };
-  }
-
-  if (trade.inMint === poolView.quoteMint && trade.outMint === poolView.baseMint) {
-    asset1In = decimalize(inAtoms, poolView.quoteDecimals);
-    asset0Out = decimalize(outAtoms, poolView.baseDecimals);
-
-    // priceNative = amount(asset1) / amount(asset0)
-    // Here: amount(asset1)=inAtoms (quote), amount(asset0)=outAtoms (base)
-    // price = (inAtoms / 10^quoteDec) / (outAtoms / 10^baseDec)
-    //       = inAtoms * 10^baseDec / (outAtoms * 10^quoteDec)
-    const num = inAtoms * 10n ** BigInt(poolView.baseDecimals);
-    const den = outAtoms * 10n ** BigInt(poolView.quoteDecimals);
-    const priceNative = divToDecimalString(num, den, 50);
-    if (!priceNative || priceNative === "0") return null;
-
-    return {
-      maker: trade.user ?? "11111111111111111111111111111111",
-      pairId: trade.pool,
-      asset1In,
-      asset0Out,
-      priceNative,
-      reserves,
-    };
-  }
-
-  // Unknown direction / not a base-quote swap
-  return null;
+  const liq = quoteUi + baseUi * px!;
+  return Number.isFinite(liq) ? liq : null;
 }
 
-/**
- * txnIndex derivation:
- * needs txnIndex = order of tx in block.
- *
- * Strategy:
- * - Fetch block once per slot using transactionDetails:"signatures"
- * - Build map signature->index
- * - Cache per slot (TTL) for speed
- */
-type TxnIndexCacheEntry = {
-  ts: number;
-  map: Map<string, number>;
-};
-
+/* txnIndex (block order) */
+type TxnIndexCacheEntry = { ts: number; map: Map<string, number> };
 const TXN_INDEX_CACHE = new Map<number, TxnIndexCacheEntry>();
 const TXN_INDEX_TTL_MS = 30_000;
 
-async function getTxnIndexForSignature(connection: Connection, slot: number, sig: string) {
+async function getTxnIndexForSignature(
+  connection: Connection,
+  slot: number,
+  sig: string
+): Promise<number> {
   const now = Date.now();
   const hit = TXN_INDEX_CACHE.get(slot);
 
   if (hit && now - hit.ts < TXN_INDEX_TTL_MS) {
-    const idx = hit.map.get(sig);
-    return idx ?? 0;
+    return hit.map.get(sig) ?? 0;
   }
 
-  // Build fresh
   const map = new Map<string, number>();
 
   try {
@@ -315,11 +159,6 @@ async function getTxnIndexForSignature(connection: Connection, slot: number, sig
       rewards: false,
     });
 
-    // web3.js getBlock returns either:
-    // - { signatures: string[] } in some modes OR
-    // - { transactions: { transaction: { signatures: string[] } }[] } depending on RPC
-    //
-    // We handle both.
     const sigs: string[] = [];
 
     const anyBlock = block as any;
@@ -332,13 +171,8 @@ async function getTxnIndexForSignature(connection: Connection, slot: number, sig
       }
     }
 
-    for (let i = 0; i < sigs.length; i++) {
-      const s = sigs[i];
-      if (typeof s === "string" && s.length > 0) map.set(s, i);
-    }
-  } catch {
-    // ignore; we'll fallback to 0
-  }
+    sigs.forEach((s, i) => map.set(s, i));
+  } catch {}
 
   TXN_INDEX_CACHE.set(slot, { ts: now, map });
   return map.get(sig) ?? 0;
@@ -355,185 +189,121 @@ export function startProgramLogStream(params: {
   const programIdStr = programId.toBase58();
   const seenTx = new Set<string>();
 
-  // Use raw RPC call to avoid web3.js PublicKey serialization issues with Triton
-  const subIdPromise = (connection as any)._rpcWebSocket.call("logsSubscribe", [
-    { mentions: [programIdStr] }
-  ]).then((subId: number) => {
-    (connection as any)._rpcWebSocket.on("logsNotification", async (args: any) => {
-      if (args.subscription !== subId) return;
-      const logInfo = args.result.value;
-      const sig = logInfo.signature;
-      if (!sig) return;
+  const subIdPromise = (connection as any)._rpcWebSocket
+    .call("logsSubscribe", [{ mentions: [programIdStr] }])
+    .then((subId: number) => {
+      (connection as any)._rpcWebSocket.on("logsNotification", async (args: any) => {
+        if (args.subscription !== subId) return;
 
-      // WS can replay, dedupe by signature
-      if (seenTx.has(sig)) return;
-      seenTx.add(sig);
+        const sig = args.result.value.signature;
+        if (!sig || seenTx.has(sig)) return;
+        seenTx.add(sig);
 
-      let tx: VersionedTransactionResponse | null = null;
-      try {
-        tx = await connection.getTransaction(sig, {
-          maxSupportedTransactionVersion: 0,
-          commitment: "confirmed",
-        });
-      } catch {
-        return;
-      }
-      if (!tx) return;
+        let tx: VersionedTransactionResponse | null = null;
+        try {
+          tx = await connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+        } catch {
+          return;
+        }
+        if (!tx || tx.meta?.err) return;
 
-      const logs = (tx.meta?.logMessages ?? []) as string[];
+        const logs = tx.meta?.logMessages ?? [];
+        const slot = tx.slot ?? null;
+        const txnIndex = slot != null ? await getTxnIndexForSignature(connection, slot, sig) : 0;
+        const decoded = (decodeEventsFromLogs(logs) as AnchorEvent[]) ?? [];
+        const poolFromEvents = firstPoolFromDecodedEvents(decoded);
 
-      // Determine txnIndex deterministically
-      const slot = tx.slot ?? null;
-      const txnIndex = slot != null ? await getTxnIndexForSignature(connection, slot, sig) : 0;
+        let cachedPoolView: Awaited<ReturnType<typeof readPool>> | null = null;
+        if (poolFromEvents) {
+          try {
+            cachedPoolView = await readPool(poolFromEvents);
+          } catch {}
+        }
 
-      // Decode Anchor events (debug/audit trail)
-      const decoded = decodeEventsFromLogs(logs) as AnchorEvent[];
+        let eventIndex = 0;
+        for (const evt of decoded) {
+          if (isSwapEventName(evt.name)) continue;
 
-      // Persist decoded events (best-effort, never crash stream)
-      try {
-        if (decoded.length > 0) {
-          let i = 0;
+          const evtPool = poolFromEventData(evt.data ?? null);
+          let poolView = cachedPoolView;
 
-          for (const evt of decoded) {
-            const evtPool = poolFromEventData(evt.data ?? null);
-
-            // Read pool view if we have a pool address (needed for formatting)
-            let poolView: Awaited<ReturnType<typeof readPool>> | null = null;
-            if (evtPool) {
-              try {
-                poolView = await readPool(evtPool);
-              } catch {
-                // ignore
-              }
-            }
-
-            // Format event data using Coingecko-compliant formatters
-            let formattedEventData: any = null;
-            if (poolView) {
-              try {
-                formattedEventData = formatEventData({
-                  tx,
-                  eventName: evt.name,
-                  eventData: evt.data ?? {},
-                  trade: null, // Will be filled in for swap events below
-                  poolView,
-                });
-              } catch {
-                // Fallback to raw data if formatting fails
-                formattedEventData = evt.data ?? null;
-              }
-            } else {
-              // No pool view available, use raw data
-              formattedEventData = evt.data ?? null;
-            }
-
-            // Get standardized event type
-            const standardEventType = getStandardEventType(evt.name);
-
-            await writeDexEvent({
-              signature: sig,
-              slot,
-              blockTime: tx.blockTime ?? null,
-              programId: programIdStr,
-              eventType: standardEventType,
-              txnIndex,
-              eventIndex: i++,
-              eventData: formattedEventData,
-              logs,
-            });
-
-            // Update liquidity state if this is a liquidity event
-            if (evtPool && slot != null && poolView && LIQ_EVENT_NAMES.has(evt.name)) {
-              try {
-                const liquidityQuote = computeLiquidityQuoteFromPostBalances({ tx, poolView });
-
-                if (liquidityQuote != null) {
-                  await updateDexPoolLiquidityState({
-                    pool: evtPool,
-                    slot,
-                    liquidityQuote,
-                  });
-                }
-              } catch {
-                // never break stream
-              }
-            }
-
-            wsHub.broadcast({
-              type: "event",
-              pool: evtPool ?? undefined,
-              data: {
-                signature: sig,
-                slot,
-                blockTime: tx.blockTime ?? null,
-                event: formattedEventData ? { name: evt.name, data: formattedEventData } : { name: evt.name },
-              },
-            });
+          if (!poolView && evtPool) {
+            try {
+              poolView = await readPool(evtPool);
+            } catch {}
           }
-        } else {
-          // No decoded Anchor events; store a minimal "tx" marker
+
+          let formatted = evt.data ?? null;
+          if (poolView) {
+            try {
+              formatted = formatEventData({
+                tx,
+                eventName: evt.name,
+                eventData: evt.data ?? {},
+                trade: null,
+                poolView,
+              });
+            } catch {}
+          }
+
           await writeDexEvent({
             signature: sig,
             slot,
             blockTime: tx.blockTime ?? null,
             programId: programIdStr,
-            eventType: "tx",
+            eventType: getStandardEventType(evt.name),
             txnIndex,
-            eventIndex: 0,
-            eventData: null,
+            eventIndex: eventIndex++,
+            eventData: formatted,
             logs,
           });
 
+          if (evtPool && slot != null && poolView && LIQ_EVENT_NAMES.has(evt.name)) {
+            const liq = computeLiquidityQuoteFromPostBalances({ tx, poolView });
+            if (liq != null) {
+              await updateDexPoolLiquidityState({ pool: evtPool, slot, liquidityQuote: liq });
+            }
+          }
+
           wsHub.broadcast({
             type: "event",
+            pool: evtPool ?? undefined,
             data: {
               signature: sig,
               slot,
               blockTime: tx.blockTime ?? null,
-              event: { name: "tx" },
+              event: formatted ? { name: evt.name, data: formatted } : { name: evt.name },
             },
           });
         }
-      } catch {
-        // Never break the stream due to supabase errors
-      }
 
-      // Materialize swaps into dex_trades + write Gecko swap event
-      //
-      // We scan all account keys and try to treat each as a "pool candidate".
-      // On the first pool that yields a valid trade, we persist:
-      // - dex_pools upsert
-      // - dex_trades write
-      // - dex_events swap write with Gecko payload
-      //
-      // NOTE: you break after first trade because dex_trades PK constraints
-      // may be signature-only in some deployments.
-      //
-      const msg = tx.transaction.message;
+        const msg = tx.transaction.message;
+        const keys =
+          "accountKeys" in msg
+            ? msg.accountKeys
+            : [
+                ...msg.staticAccountKeys,
+                ...(tx.meta?.loadedAddresses?.writable ?? []),
+                ...(tx.meta?.loadedAddresses?.readonly ?? []),
+              ];
 
-      const accountKeys =
-        "accountKeys" in msg
-          ? (msg.accountKeys as PublicKey[])
-          : ([
-              ...msg.staticAccountKeys,
-              ...(tx.meta?.loadedAddresses?.writable ?? []),
-              ...(tx.meta?.loadedAddresses?.readonly ?? []),
-            ] as PublicKey[]);
+        const pools = poolFromEvents ? [poolFromEvents] : keys.map((k) => k.toBase58());
 
-      for (const k of accountKeys) {
-        const pool = k.toBase58();
-        const seenKey = `${sig}:${pool}`;
-        if (store.seen.has(seenKey)) continue;
+        for (const pool of pools) {
+          const seenKey = `${sig}:${pool}`;
+          if (store.seen.has(seenKey)) continue;
 
-        let poolView: Awaited<ReturnType<typeof readPool>>;
-        try {
-          poolView = await readPool(pool);
-        } catch {
-          continue;
-        }
+          let poolView: Awaited<ReturnType<typeof readPool>>;
+          try {
+            poolView = cachedPoolView && pool === poolFromEvents ? cachedPoolView : await readPool(pool);
+          } catch {
+            if (poolFromEvents) break;
+            continue;
+          }
 
-        // keep pools table fresh
-        try {
           await upsertDexPool({
             pool,
             programId: programIdStr,
@@ -542,56 +312,31 @@ export function startProgramLogStream(params: {
             baseDecimals: poolView.baseDecimals,
             quoteDecimals: poolView.quoteDecimals,
           });
-        } catch {
-          // ignore
-        }
 
-        const trade = deriveTradeFromTransaction(tx, {
-          pool,
-          baseVault: poolView.baseVault,
-          quoteVault: poolView.quoteVault,
-          baseMint: poolView.baseMint,
-          quoteMint: poolView.quoteMint,
-        });
+          const trade = deriveTradeFromTransaction(tx, {
+            pool,
+            baseVault: poolView.baseVault,
+            quoteVault: poolView.quoteVault,
+            baseMint: poolView.baseMint,
+            quoteMint: poolView.quoteMint,
+          });
+          if (!trade) break;
 
-        if (!trade) continue;
+          store.seen.add(seenKey);
+          store.byPool.set(pool, [trade, ...(store.byPool.get(pool) ?? [])].slice(0, 500));
 
-        // Update in-memory store
-        store.seen.add(seenKey);
-        const arr = store.byPool.get(pool) ?? [];
-        arr.unshift(trade);
-        store.byPool.set(pool, arr.slice(0, 500));
-
-        // Persist trade (best-effort)
-        try {
           await writeDexTrade(trade);
-        } catch {
-          // ignore
-        }
 
-        // Update live pool state ONLY after a real swap
-        try {
           await updateDexPoolLiveState({
             pool,
             activeBin: poolView.activeBin,
-            priceQuotePerBase: poolView.priceNumber, // executed price
+            priceQuotePerBase: poolView.priceNumber,
             slot: tx.slot,
             signature: sig,
           });
-        } catch {
-          // ignore
-        }
 
-        // Broadcast trade for app consumers
-        wsHub.broadcast({ type: "trade", pool, data: trade });
+          wsHub.broadcast({ type: "trade", pool, data: trade });
 
-        // Persist swap event into dex_events
-        //
-        // This is what /api/v1/events will later serve.
-        //
-        // eventIndex here is "within the transaction" for swap events.
-        // If you later support multiple swap events per tx, increment this.
-        try {
           const swapEventData = formatEventData({
             tx,
             eventName: "SwapExecuted",
@@ -599,6 +344,7 @@ export function startProgramLogStream(params: {
             trade,
             poolView,
           });
+
           if (swapEventData) {
             await writeDexEvent({
               signature: sig,
@@ -612,17 +358,13 @@ export function startProgramLogStream(params: {
               logs,
             });
           }
-        } catch {
-          // ignore
+
+          break;
         }
+      });
 
-        // Because dex_trades PK may be signature-only, do NOT insert multiple pools per tx.
-        break;
-      }
+      return subId;
     });
-
-    return subId;
-  });
 
   return {
     async stop() {

@@ -16,17 +16,6 @@ function nowUnix() {
   return Math.floor(Date.now() / 1000);
 }
 
-function isOnConflictTargetError(err: any): boolean {
-  const msg = String(err?.message ?? err ?? "");
-  return (
-    msg.toLowerCase().includes("on conflict") ||
-    msg.toLowerCase().includes("constraint") ||
-    msg.toLowerCase().includes("duplicate key") ||
-    msg.toLowerCase().includes("there is no unique or exclusion constraint") ||
-    msg.toLowerCase().includes("conflict target")
-  );
-}
-
 async function upsertWithFallback(
   table: string,
   row: Record<string, any>,
@@ -37,9 +26,7 @@ async function upsertWithFallback(
   for (const onConflict of conflictTargets) {
     const { error } = await supabase.from(table).upsert(row, { onConflict });
     if (!error) return;
-
     lastErr = error;
-    if (!isOnConflictTargetError(error)) break;
   }
 
   throw lastErr;
@@ -69,7 +56,9 @@ export async function upsertDexPool(p: {
 }
 
 export async function writeDexTrade(trade: Trade) {
-  if (!trade.inMint || !trade.outMint || !trade.amountIn || !trade.amountOut) return;
+  if (!trade.inMint || !trade.outMint || !trade.amountIn || !trade.amountOut) {
+    return;
+  }
 
   const row = {
     signature: trade.signature,
@@ -84,9 +73,22 @@ export async function writeDexTrade(trade: Trade) {
     inserted_at: nowIso(),
   };
 
-  await upsertWithFallback("dex_trades", row, ["signature,pool", "signature"]);
+  await upsertWithFallback("dex_trades", row, [
+    "signature,pool",
+    "signature",
+  ]);
 }
 
+/**
+ * CANONICAL EVENT WRITE
+ *
+ * Uniqueness is enforced exclusively by:
+ *   (program_id, slot, txn_index, event_index)
+ *
+ * No upserts.
+ * No fallbacks.
+ * Replays MUST fail loudly.
+ */
 export async function writeDexEvent(params: {
   signature: string;
   slot: number | null;
@@ -111,11 +113,10 @@ export async function writeDexEvent(params: {
     inserted_at: nowIso(),
   };
 
-  await upsertWithFallback("dex_events", row, [
-    "slot,txn_index,event_index,event_type",
-    "signature,event_index,event_type",
-    "signature,event_index",
-  ]);
+  await supabase
+    .from("dex_events")
+    .insert(row)
+    .throwOnError();
 }
 
 export async function updateDexPoolLiveState(params: {
@@ -131,14 +132,15 @@ export async function updateDexPoolLiveState(params: {
     .eq("pool", params.pool)
     .maybeSingle();
 
-  if (readErr) throw new Error(`updateDexPoolLiveState read failed: ${readErr.message}`);
+  if (readErr) {
+    throw new Error(`updateDexPoolLiveState read failed: ${readErr.message}`);
+  }
 
   const curSlot = (cur?.last_update_slot ?? null) as number | null;
   if (curSlot != null && params.slot <= curSlot) {
     return;
   }
 
-  /** never overwrite price with null */
   const update: Record<string, any> = {
     active_bin: params.activeBin,
     last_update_slot: params.slot,
@@ -146,7 +148,11 @@ export async function updateDexPoolLiveState(params: {
     updated_at: nowIso(),
   };
 
-  if (params.priceQuotePerBase != null && Number.isFinite(params.priceQuotePerBase)) {
+  // Never overwrite price with null
+  if (
+    params.priceQuotePerBase != null &&
+    Number.isFinite(params.priceQuotePerBase)
+  ) {
     update.last_price_quote_per_base = params.priceQuotePerBase;
   }
 
@@ -155,7 +161,9 @@ export async function updateDexPoolLiveState(params: {
     .update(update)
     .eq("pool", params.pool);
 
-  if (updErr) throw new Error(`updateDexPoolLiveState update failed: ${updErr.message}`);
+  if (updErr) {
+    throw new Error(`updateDexPoolLiveState update failed: ${updErr.message}`);
+  }
 }
 
 export async function updateDexPoolLiquidityState(args: {
@@ -170,7 +178,7 @@ export async function updateDexPoolLiquidityState(args: {
   const patch: Record<string, any> = {
     liquidity_quote: liquidityQuote,
     latest_liq_event_slot: slot,
-    updated_at: new Date().toISOString(),
+    updated_at: nowIso(),
   };
 
   const { error } = await supabase

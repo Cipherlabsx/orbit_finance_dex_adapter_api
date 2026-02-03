@@ -1,3 +1,4 @@
+// Contract:
 // - /latest-block: MUST return the latest block (Solana slot) for which /events data is available.
 //   => reads latest persisted slot from public.dex_events
 //
@@ -24,12 +25,10 @@ export type StandardsSwapEvent = {
   eventIndex: number;
   maker: string;
   pairId: string;
-
   asset0In?: string;
   asset1In?: string;
   asset0Out?: string;
   asset1Out?: string;
-
   priceNative: string;
   reserves: {
     asset0: string;
@@ -45,7 +44,6 @@ export type StandardsLiquidityEvent = {
   eventIndex: number;
   maker: string;
   pairId: string;
-
   asset0Amount: string;
   asset1Amount: string;
   shares: string;
@@ -71,25 +69,31 @@ export type StandardsEventsResponse = {
   events: StandardsEvent[];
 };
 
-// Validation of persisted payload (dex_events.event_data)
-//
-// For Step 1 we expect the ingestion path to store Gecko-ready payload in event_data.
-// If it's not there yet, events will be skipped (to avoid halting the indexer with junk).
-//
+// Schemas for persisted event_data
+const ReservesSchema = z.object({
+  asset0: z.string().min(1),
+  asset1: z.string().min(1),
+});
+
 const SwapEventDataSchema = z.object({
   maker: z.string().min(1).optional(),
   pairId: z.string().min(32),
-
   asset0In: z.string().optional(),
   asset1In: z.string().optional(),
   asset0Out: z.string().optional(),
   asset1Out: z.string().optional(),
-
   priceNative: z.string().min(1),
-  reserves: z.object({
-    asset0: z.string().min(1),
-    asset1: z.string().min(1),
-  }),
+  reserves: ReservesSchema,
+});
+
+const LiquidityEventDataSchema = z.object({
+  maker: z.string().min(1).optional(),
+  pairId: z.string().min(32),
+  asset0Amount: z.string().min(1),
+  asset1Amount: z.string().min(1),
+  shares: z.string().optional(),
+  priceNative: z.string().optional(),
+  reserves: ReservesSchema.optional(),
 });
 
 function isPositiveDecimalString(x: string): boolean {
@@ -98,11 +102,10 @@ function isPositiveDecimalString(x: string): boolean {
 }
 
 /**
- * Enforces Gecko rule:
- * - either (asset0In + asset1Out) OR (asset1In + asset0Out) OR none.
+ * either (asset0In + asset1Out) OR (asset1In + asset0Out) OR none.
  * If malformed, drop amounts (but keep event) to avoid schema-halting.
  */
-function normalizeAmounts(args: {
+function normalizeSwapAmounts(args: {
   asset0In?: string;
   asset1In?: string;
   asset0Out?: string;
@@ -129,6 +132,7 @@ function normalizeAmounts(args: {
   };
 }
 
+// DB row typing + converters
 type DexEventRow = {
   signature: string;
   slot: number | null;
@@ -148,15 +152,15 @@ function rowToSwapEvent(row: DexEventRow): StandardsSwapEvent | null {
 
   const d = parsed.data;
 
-  // halt on priceNative=0 or invalid
+  // Drop invalid swaps (must be >0)
   if (!isPositiveDecimalString(d.priceNative)) return null;
 
-  // Reserves must be numeric-ish (at least parseable)
+  // Reserves must be parseable numbers
   const r0 = Number(d.reserves.asset0);
   const r1 = Number(d.reserves.asset1);
   if (!Number.isFinite(r0) || !Number.isFinite(r1)) return null;
 
-  const amounts = normalizeAmounts({
+  const amounts = normalizeSwapAmounts({
     asset0In: d.asset0In,
     asset1In: d.asset1In,
     asset0Out: d.asset0Out,
@@ -177,38 +181,43 @@ function rowToSwapEvent(row: DexEventRow): StandardsSwapEvent | null {
   };
 }
 
+function rowToLiquidityEvent(row: DexEventRow): StandardsLiquidityEvent | null {
+  if (row.slot == null || row.block_time == null) return null;
+  if (row.event_type !== "liquidityDeposit" && row.event_type !== "liquidityWithdraw") return null;
+
+  const parsed = LiquidityEventDataSchema.safeParse(row.event_data ?? {});
+  if (!parsed.success) return null;
+
+  const d = parsed.data;
+
+  // Reserves optional for liquidity events, but if present must be sane
+  const reserves = d.reserves ?? { asset0: "0", asset1: "0" };
+
+  return {
+    block: { blockNumber: row.slot, blockTimestamp: row.block_time },
+    eventType: row.event_type as "liquidityDeposit" | "liquidityWithdraw",
+    txnId: row.signature,
+    txnIndex: row.txn_index ?? 0,
+    eventIndex: row.event_index ?? 0,
+    maker: d.maker ?? "11111111111111111111111111111111",
+    pairId: d.pairId,
+    asset0Amount: d.asset0Amount,
+    asset1Amount: d.asset1Amount,
+    shares: d.shares ?? "0",
+    priceNative: d.priceNative ?? "0",
+    reserves,
+  };
+}
+
 function rowToEvent(row: DexEventRow): StandardsEvent | null {
   if (row.slot == null || row.block_time == null) return null;
 
-  // Try swap event first
-  if (row.event_type === "swap") {
-    return rowToSwapEvent(row);
-  }
+  if (row.event_type === "swap") return rowToSwapEvent(row);
 
-  // Handle liquidity events
   if (row.event_type === "liquidityDeposit" || row.event_type === "liquidityWithdraw") {
-    const data = row.event_data ?? {};
-
-    // Validate required fields
-    if (!data.pairId || !data.asset0Amount || !data.asset1Amount) return null;
-
-    return {
-      block: { blockNumber: row.slot, blockTimestamp: row.block_time },
-      eventType: row.event_type as "liquidityDeposit" | "liquidityWithdraw",
-      txnId: row.signature,
-      txnIndex: row.txn_index ?? 0,
-      eventIndex: row.event_index ?? 0,
-      maker: data.maker ?? "11111111111111111111111111111111",
-      pairId: data.pairId,
-      asset0Amount: data.asset0Amount,
-      asset1Amount: data.asset1Amount,
-      shares: data.shares ?? "0",
-      priceNative: data.priceNative ?? "0",
-      reserves: data.reserves ?? { asset0: "0", asset1: "0" },
-    };
+    return rowToLiquidityEvent(row);
   }
 
-  // Handle all other event types as generic events
   const data = row.event_data ?? {};
   return {
     block: { blockNumber: row.slot, blockTimestamp: row.block_time },
@@ -220,12 +229,11 @@ function rowToEvent(row: DexEventRow): StandardsEvent | null {
   };
 }
 
+// Queries
+
 /**
  * /events?fromBlock&toBlock (inclusive)
  * DB-backed and deterministic.
- *
- * Note: we keep the first parameter for route compatibility,
- * but we ignore it since DB is the source-of-truth.
  *
  * Supports optional event type filtering.
  */
@@ -235,6 +243,7 @@ export async function readEventsBySlotRange(
   toSlot: number,
   eventTypes?: string[]
 ): Promise<StandardsEventsResponse> {
+  if (!Number.isFinite(fromSlot) || !Number.isFinite(toSlot)) return { events: [] };
   if (toSlot < fromSlot) return { events: [] };
 
   let query = supabaseAdmin
@@ -246,13 +255,11 @@ export async function readEventsBySlotRange(
     .order("txn_index", { ascending: true })
     .order("event_index", { ascending: true });
 
-  // Filter by event types if provided
   if (eventTypes && eventTypes.length > 0) {
     query = query.in("event_type", eventTypes);
   }
 
   const { data, error } = await query;
-
   if (error) return { events: [] };
 
   const rows = (data ?? []) as DexEventRow[];
@@ -262,17 +269,36 @@ export async function readEventsBySlotRange(
     const ev = rowToEvent(row);
     if (ev) events.push(ev);
   }
+
   return { events };
 }
 
 /**
  * /latest-block
- * MUST advance with the chain head so pollers don't stall
- * during periods of no program activity.
+ * MUST return latest slot for which /events data is available.
+ * Source-of-truth: dex_events.max(slot).
  *
- * /events may return empty for ranges with no swaps.
+ * If table is empty, we fall back to chain head (so clients still get a sane block).
  */
 export async function readLatestBlock(): Promise<{ block: StandardsBlock }> {
+  // latest persisted slot from DB
+  const { data, error } = await supabaseAdmin
+    .from("dex_events")
+    .select("slot,block_time")
+    .not("slot", "is", null)
+    .order("slot", { ascending: false })
+    .limit(1);
+
+  if (!error && data && data.length > 0) {
+    const row = data[0] as { slot: number | null; block_time: number | null };
+    const slot = row.slot ?? null;
+    if (slot != null) {
+      const ts = row.block_time ?? (await connection.getBlockTime(slot)) ?? Math.floor(Date.now() / 1000);
+      return { block: { blockNumber: slot, blockTimestamp: ts } };
+    }
+  }
+
+  // fallback: chain head (only if DB empty / unavailable)
   const slot = await connection.getSlot("confirmed");
   const blockTime = await connection.getBlockTime(slot);
 

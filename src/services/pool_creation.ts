@@ -295,7 +295,8 @@ export async function buildPoolCreationTransactions(
   const quoteMintPk = new PublicKey(quoteMint);
 
   // Validate inputs
-  validateCanonicalOrder(baseMintPk, quoteMintPk);
+  // TESTING: Canonical order validation temporarily disabled to test on-chain program requirements
+  // validateCanonicalOrder(baseMintPk, quoteMintPk);
   validateBinStep(binStepBps);
   validateFeeConfig(feeConfig);
 
@@ -317,18 +318,18 @@ export async function buildPoolCreationTransactions(
   const coder = new BorshCoder(ORBIT_IDL);
 
   const initPoolData = coder.instruction.encode("init_pool", {
-    baseMint: baseMintPk,
-    quoteMint: quoteMintPk,
-    binStepBps,
-    initialPriceQ6464: initialPriceQ64_64,
-    feeConfig: {
-      baseFeeBps: feeConfig.baseFeeBps,
-      creatorCutBps: feeConfig.creatorCutBps,
-      splitHoldersMicrobps: feeConfig.splitHoldersMicrobps,
-      splitNftMicrobps: feeConfig.splitNftMicrobps,
-      splitCreatorExtraMicrobps: feeConfig.splitCreatorExtraMicrobps,
+    base_mint: baseMintPk,
+    quote_mint: quoteMintPk,
+    bin_step_bps: binStepBps,
+    initial_price_q64_64: initialPriceQ64_64,
+    fee_config: {
+      base_fee_bps: feeConfig.baseFeeBps,
+      creator_cut_bps: feeConfig.creatorCutBps,
+      split_holders_microbps: feeConfig.splitHoldersMicrobps,
+      split_nft_microbps: feeConfig.splitNftMicrobps,
+      split_creator_extra_microbps: feeConfig.splitCreatorExtraMicrobps,
     },
-    accountingMode,
+    accounting_mode: accountingMode,
   });
 
   const initPoolIx = new TransactionInstruction({

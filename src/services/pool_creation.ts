@@ -20,6 +20,7 @@ import {
 } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { BorshCoder } from "@coral-xyz/anchor";
+import BN from "bn.js";
 import { ORBIT_IDL } from "../idl/coder.js";
 import { PROGRAM_ID } from "../solana.js";
 
@@ -41,7 +42,7 @@ export type FeeConfig = {
 };
 
 /**
- * Input parameters for pool creation
+ * Input parameters for pool creation (without liquidity)
  */
 export type PoolCreationParams = {
   admin: string;                 // Pool admin (pays for creation, can be rotated later)
@@ -59,6 +60,16 @@ export type PoolCreationParams = {
 };
 
 /**
+ * Input parameters for pool creation WITH initial liquidity
+ */
+export type PoolCreationWithLiquidityParams = PoolCreationParams & {
+  baseAmount: string;            // Base token amount to deposit (in UI units)
+  quoteAmount: string;           // Quote token amount to deposit (in UI units)
+  binsLeft: number;              // Number of bins to the left of active bin
+  binsRight: number;             // Number of bins to the right of active bin
+};
+
+/**
  * Result of pool creation transaction building
  *
  * SECURITY: Only returns public keys, never secret keys
@@ -66,12 +77,13 @@ export type PoolCreationParams = {
  */
 export type PoolCreationResult = {
   transactions: Array<{
-    type: "init_pool" | "init_pool_vaults";
+    type: "init_pool" | "init_pool_vaults" | "create_bin_arrays" | "init_position" | "add_liquidity";
     instructions: SerializedInstruction[];
   }>;
   poolAddress: string;
   lpMintPublicKey: string; // SECURITY: Only public key returned
   registryAddress: string;
+  positionAddress?: string; // Only present if liquidity is added
 };
 
 /**
@@ -229,6 +241,41 @@ function deriveVaultPda(pool: PublicKey, vaultType: string): [PublicKey, number]
 }
 
 /**
+ * Derives bin array PDA
+ * Seeds: ["bin_array", pool, lower_bin_index (i32, little-endian)]
+ */
+function deriveBinArrayPda(pool: PublicKey, lowerBinIndex: number): [PublicKey, number] {
+  const indexBuffer = Buffer.alloc(4);
+  indexBuffer.writeInt32LE(lowerBinIndex, 0);
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("bin_array"),
+      pool.toBuffer(),
+      indexBuffer,
+    ],
+    PROGRAM_ID
+  );
+}
+
+/**
+ * Derives position PDA
+ * Seeds: ["position", pool, owner, nonce (u64, little-endian)]
+ */
+function derivePositionPda(pool: PublicKey, owner: PublicKey, nonce: bigint): [PublicKey, number] {
+  const nonceBuffer = Buffer.alloc(8);
+  nonceBuffer.writeBigUInt64LE(nonce, 0);
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("position"),
+      pool.toBuffer(),
+      owner.toBuffer(),
+      nonceBuffer,
+    ],
+    PROGRAM_ID
+  );
+}
+
+/**
  * Returns priority fee micro-lamports based on level
  */
 function getPriorityFeeMicroLamports(level: PriorityLevel): number {
@@ -321,7 +368,7 @@ export async function buildPoolCreationTransactions(
     base_mint: baseMintPk,
     quote_mint: quoteMintPk,
     bin_step_bps: binStepBps,
-    initial_price_q64_64: initialPriceQ64_64,
+    initial_price_q64_64: new BN(initialPriceQ64_64.toString()),
     fee_config: {
       base_fee_bps: feeConfig.baseFeeBps,
       creator_cut_bps: feeConfig.creatorCutBps,
@@ -404,4 +451,209 @@ export async function buildPoolCreationTransactions(
     lpMintPublicKey: lpMintPk.toBase58(), // SECURITY: Only public key, never secret
     registryAddress: registryPda.toBase58(),
   };
+}
+
+/**
+ * Builds pool creation WITH initial liquidity transactions
+ *
+ * Returns 4 transaction groups:
+ * 1. init_pool: Creates pool state, LP mint, and registry
+ * 2. init_pool_vaults: Creates token vaults for pool
+ * 3. create_bin_arrays: Creates bin arrays for liquidity distribution
+ * 4. init_position: Creates position account
+ * 5. add_liquidity: Deposits tokens into bins
+ */
+export async function buildPoolCreationWithLiquidityTransactions(
+  params: PoolCreationWithLiquidityParams
+): Promise<PoolCreationResult> {
+  const {
+    admin,
+    baseMint,
+    quoteMint,
+    binStepBps,
+    initialPrice,
+    baseDecimals,
+    quoteDecimals,
+    baseAmount,
+    quoteAmount,
+    binsLeft,
+    binsRight,
+    priorityLevel = "turbo",
+  } = params;
+
+  // First, build the base pool creation transactions
+  const baseResult = await buildPoolCreationTransactions(params);
+
+  const adminPk = new PublicKey(admin);
+  const baseMintPk = new PublicKey(baseMint);
+  const quoteMintPk = new PublicKey(quoteMint);
+  const poolPda = new PublicKey(baseResult.poolAddress);
+
+  const coder = new BorshCoder(ORBIT_IDL);
+  const priorityFeeMicroLamports = getPriorityFeeMicroLamports(priorityLevel);
+  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
+  const computeUnitPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports });
+
+  // Calculate active bin from initial price
+  const priceQ64_64 = calculatePriceQ64_64(initialPrice, baseDecimals, quoteDecimals);
+  const activeBin = priceToActiveBin(priceQ64_64, binStepBps);
+
+  // Calculate bin range based on strategy
+  const lowerBinIndex = activeBin - binsLeft;
+  const upperBinIndex = activeBin + binsRight;
+
+  // Determine which bin arrays we need to create
+  const binArraysNeeded = new Set<number>();
+  for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
+    const arrayIndex = Math.floor(binIndex / 128); // Each bin array holds 128 bins
+    binArraysNeeded.add(arrayIndex * 128); // Lower bin index of the array
+  }
+
+  // Build create_bin_array instructions
+  const createBinArrayInstructions = Array.from(binArraysNeeded).map((lowerBinIdx) => {
+    const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIdx);
+
+    const data = coder.instruction.encode("create_bin_array", {
+      lower_bin_index: lowerBinIdx,
+    });
+
+    return serializeInstruction(
+      new TransactionInstruction({
+        programId: PROGRAM_ID,
+        keys: [
+          { pubkey: poolPda, isSigner: false, isWritable: false },
+          { pubkey: adminPk, isSigner: true, isWritable: true },
+          { pubkey: binArrayPda, isSigner: false, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data,
+      })
+    );
+  });
+
+  // Build init_position instruction
+  const positionNonce = BigInt(0); // First position for this user in this pool
+  const [positionPda] = derivePositionPda(poolPda, adminPk, positionNonce);
+
+  const initPositionData = coder.instruction.encode("init_position", {
+    nonce: positionNonce,
+  });
+
+  const initPositionIx = serializeInstruction(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: poolPda, isSigner: false, isWritable: false },
+        { pubkey: adminPk, isSigner: true, isWritable: true },
+        { pubkey: positionPda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: initPositionData,
+    })
+  );
+
+  // Build add_liquidity_v2 instruction
+  const [baseVaultPda] = deriveVaultPda(poolPda, "base");
+  const [quoteVaultPda] = deriveVaultPda(poolPda, "quote");
+
+  // Convert amounts to raw (atoms)
+  const baseAmountRaw = BigInt(Math.floor(parseFloat(baseAmount) * 10 ** baseDecimals));
+  const quoteAmountRaw = BigInt(Math.floor(parseFloat(quoteAmount) * 10 ** quoteDecimals));
+
+  // Build deposits array - distribute evenly across bins
+  const deposits: Array<{ bin_index: number; amount: bigint }> = [];
+  const totalBins = upperBinIndex - lowerBinIndex + 1;
+
+  // Simple uniform distribution strategy
+  for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
+    const baseShare = baseAmountRaw / BigInt(totalBins);
+    const quoteShare = quoteAmountRaw / BigInt(totalBins);
+
+    // For bins below active: only base token
+    // For bins above active: only quote token
+    // Active bin: both tokens
+    if (binIndex < activeBin && baseShare > 0n) {
+      deposits.push({ bin_index: binIndex, amount: baseShare });
+    } else if (binIndex > activeBin && quoteShare > 0n) {
+      deposits.push({ bin_index: binIndex, amount: quoteShare });
+    } else if (binIndex === activeBin) {
+      if (baseShare > 0n) deposits.push({ bin_index: binIndex, amount: baseShare });
+      if (quoteShare > 0n) deposits.push({ bin_index: binIndex, amount: quoteShare });
+    }
+  }
+
+  const addLiquidityData = coder.instruction.encode("add_liquidity_v2", {
+    deposits,
+  });
+
+  // Derive owner's token accounts (ATAs)
+  const [ownerBaseAta] = PublicKey.findProgramAddressSync(
+    [adminPk.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), baseMintPk.toBuffer()],
+    new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL") // Associated Token Program
+  );
+
+  const [ownerQuoteAta] = PublicKey.findProgramAddressSync(
+    [adminPk.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), quoteMintPk.toBuffer()],
+    new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+  );
+
+  const addLiquidityIx = serializeInstruction(
+    new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: poolPda, isSigner: false, isWritable: true },
+        { pubkey: adminPk, isSigner: true, isWritable: false },
+        { pubkey: ownerBaseAta, isSigner: false, isWritable: true },
+        { pubkey: ownerQuoteAta, isSigner: false, isWritable: true },
+        { pubkey: baseVaultPda, isSigner: false, isWritable: true },
+        { pubkey: quoteVaultPda, isSigner: false, isWritable: true },
+        { pubkey: positionPda, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data: addLiquidityData,
+    })
+  );
+
+  return {
+    ...baseResult,
+    transactions: [
+      ...baseResult.transactions,
+      {
+        type: "create_bin_arrays",
+        instructions: [
+          serializeInstruction(computeUnitLimitIx),
+          serializeInstruction(computeUnitPriceIx),
+          ...createBinArrayInstructions,
+        ],
+      },
+      {
+        type: "init_position",
+        instructions: [
+          serializeInstruction(computeUnitLimitIx),
+          serializeInstruction(computeUnitPriceIx),
+          initPositionIx,
+        ],
+      },
+      {
+        type: "add_liquidity",
+        instructions: [
+          serializeInstruction(computeUnitLimitIx),
+          serializeInstruction(computeUnitPriceIx),
+          addLiquidityIx,
+        ],
+      },
+    ],
+    positionAddress: positionPda.toBase58(),
+  };
+}
+
+/**
+ * Convert Q64.64 price to active bin index
+ */
+function priceToActiveBin(priceQ64_64: bigint, binStepBps: number): number {
+  // Active bin = floor(log(price) / log(1 + binStep/10000))
+  // Simplified approximation for now
+  const priceFloat = Number(priceQ64_64) / Number(1n << 64n);
+  const binStep = binStepBps / 10000;
+  return Math.floor(Math.log(priceFloat) / Math.log(1 + binStep));
 }

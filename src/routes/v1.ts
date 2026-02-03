@@ -16,7 +16,7 @@ import { dbListPools, dbGetPool } from "../services/pool_db.js";
 import { dbListTokens, dbGetToken } from "../services/token_registry.js";
 import { getTokenPrice, getRelativePrice, getBatchPrices } from "../services/price_oracle.js";
 import { calculateHolderClaimable, calculateNftClaimable } from "../services/rewards.js";
-import { buildPoolCreationTransactions, type FeeConfig } from "../services/pool_creation.js";
+import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, type FeeConfig } from "../services/pool_creation.js";
 import { readPool } from "../services/pool_reader.js";
 import { upsertDexPool } from "../supabase.js";
 
@@ -360,6 +360,11 @@ export async function v1Routes(app: FastifyInstance) {
         { message: "Fee splits must sum to exactly 100,000 microbps" }
       ),
       accountingMode: z.number().int().min(0).max(1),
+      // Liquidity parameters (optional - if not provided, creates empty pool)
+      baseAmount: z.string().optional(),
+      quoteAmount: z.string().optional(),
+      binsLeft: z.number().int().min(1).optional(),
+      binsRight: z.number().int().min(1).optional(),
       settings: z.object({
         priorityLevel: z.enum(["fast", "turbo", "ultra"]).optional(),
       }).optional(),
@@ -390,21 +395,42 @@ export async function v1Routes(app: FastifyInstance) {
         };
       }
 
-      // Build transactions
-      const result = await buildPoolCreationTransactions({
-        admin: body.admin,
-        creator: body.creator,
-        baseMint: body.baseMint,
-        quoteMint: body.quoteMint,
-        lpMintPublicKey: body.lpMintPublicKey, // SECURITY: Client-generated public key
-        binStepBps: body.binStepBps,
-        initialPrice: body.initialPrice,
-        baseDecimals: baseToken.decimals,
-        quoteDecimals: quoteToken.decimals,
-        feeConfig: body.feeConfig,
-        accountingMode: body.accountingMode,
-        priorityLevel: body.settings?.priorityLevel ?? "turbo",
-      });
+      // Build transactions (with or without liquidity)
+      const hasLiquidity = body.baseAmount && body.quoteAmount && body.binsLeft && body.binsRight;
+
+      const result = hasLiquidity
+        ? await buildPoolCreationWithLiquidityTransactions({
+            admin: body.admin,
+            creator: body.creator,
+            baseMint: body.baseMint,
+            quoteMint: body.quoteMint,
+            lpMintPublicKey: body.lpMintPublicKey,
+            binStepBps: body.binStepBps,
+            initialPrice: body.initialPrice,
+            baseDecimals: baseToken.decimals,
+            quoteDecimals: quoteToken.decimals,
+            feeConfig: body.feeConfig,
+            accountingMode: body.accountingMode,
+            baseAmount: body.baseAmount!,
+            quoteAmount: body.quoteAmount!,
+            binsLeft: body.binsLeft!,
+            binsRight: body.binsRight!,
+            priorityLevel: body.settings?.priorityLevel ?? "turbo",
+          })
+        : await buildPoolCreationTransactions({
+            admin: body.admin,
+            creator: body.creator,
+            baseMint: body.baseMint,
+            quoteMint: body.quoteMint,
+            lpMintPublicKey: body.lpMintPublicKey,
+            binStepBps: body.binStepBps,
+            initialPrice: body.initialPrice,
+            baseDecimals: baseToken.decimals,
+            quoteDecimals: quoteToken.decimals,
+            feeConfig: body.feeConfig,
+            accountingMode: body.accountingMode,
+            priorityLevel: body.settings?.priorityLevel ?? "turbo",
+          });
 
       reply.header("cache-control", "no-store");
       return {

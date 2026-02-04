@@ -26,6 +26,11 @@ import { ORBIT_IDL } from "../idl/coder.js";
 import { PROGRAM_ID } from "../solana.js";
 
 /**
+ * SPL Memo program ID for adding human-readable descriptions to transactions
+ */
+const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+
+/**
  * Priority fee levels for transaction execution
  */
 export type PriorityLevel = "fast" | "turbo" | "ultra";
@@ -289,6 +294,18 @@ function getPriorityFeeMicroLamports(level: PriorityLevel): number {
 }
 
 /**
+ * Creates a memo instruction for transaction metadata
+ * Helps wallets display transaction purpose to users
+ */
+function createMemoInstruction(text: string): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: MEMO_PROGRAM_ID,
+    keys: [],
+    data: Buffer.from(text, "utf-8"),
+  });
+}
+
+/**
  * Serializes instruction for JSON transport
  */
 function serializeInstruction(ix: TransactionInstruction): SerializedInstruction {
@@ -429,6 +446,14 @@ export async function buildPoolCreationTransactions(
   const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 });
   const computeUnitPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports });
 
+  // Create descriptive memos for wallet display
+  const initPoolMemoIx = createMemoInstruction(
+    `Creating DLMM Pool | ${baseMintPk.toBase58().slice(0, 6)}.../${quoteMintPk.toBase58().slice(0, 6)}... | Bin Step: ${binStepBps}bps | Price: ${initialPrice}`
+  );
+  const initVaultsMemoIx = createMemoInstruction(
+    `Initializing Pool Vaults | Setting up token storage for liquidity`
+  );
+
   return {
     transactions: [
       {
@@ -436,6 +461,7 @@ export async function buildPoolCreationTransactions(
         instructions: [
           serializeInstruction(computeUnitLimitIx),
           serializeInstruction(computeUnitPriceIx),
+          serializeInstruction(initPoolMemoIx),
           serializeInstruction(initPoolIx),
         ],
       },
@@ -444,6 +470,7 @@ export async function buildPoolCreationTransactions(
         instructions: [
           serializeInstruction(computeUnitLimitIx),
           serializeInstruction(computeUnitPriceIx),
+          serializeInstruction(initVaultsMemoIx),
           serializeInstruction(initVaultsIx),
         ],
       },
@@ -553,12 +580,18 @@ export async function buildPoolCreationWithLiquidityTransactions(
       batchInstructions.push(createBinArrayIx);
     }
 
+    // Add memo for this batch
+    const binArrayMemoIx = createMemoInstruction(
+      `Creating Bin Arrays ${i / BIN_ARRAY_BATCH_SIZE + 1}/${Math.ceil(binArrayIndicesToCreate.length / BIN_ARRAY_BATCH_SIZE)} | Bins: [${batchIndices.join(", ")}]`
+    );
+
     // Add batch transaction
     createBinArrayTransactions.push({
       type: "create_bin_arrays",
       instructions: [
         serializeInstruction(computeUnitLimitIx),
         serializeInstruction(computeUnitPriceIx),
+        serializeInstruction(binArrayMemoIx),
         ...batchInstructions,
       ],
     });
@@ -583,6 +616,10 @@ export async function buildPoolCreationWithLiquidityTransactions(
       ],
       data: initPositionData,
     })
+  );
+
+  const initPositionMemoIx = createMemoInstruction(
+    `Creating Liquidity Position | Owner: ${adminPk.toBase58().slice(0, 8)}...`
   );
 
   // Build add_liquidity_v2 instruction(s)
@@ -706,12 +743,18 @@ export async function buildPoolCreationWithLiquidityTransactions(
       batchInstructions.push(initPositionBinIx);
     }
 
+    // Add memo for this batch
+    const positionBinMemoIx = createMemoInstruction(
+      `Initializing Position Bins ${i / INIT_BIN_BATCH_SIZE + 1}/${Math.ceil(binIndicesToCreate.length / INIT_BIN_BATCH_SIZE)} | Bins: [${batchBinIndices.join(", ")}]`
+    );
+
     // Add batch transaction
     initPositionBinTransactions.push({
       type: "init_position_bins",
       instructions: [
         serializeInstruction(computeUnitLimitIx),
         serializeInstruction(computeUnitPriceIx),
+        serializeInstruction(positionBinMemoIx),
         ...batchInstructions,
       ],
     });
@@ -995,12 +1038,28 @@ export async function buildPoolCreationWithLiquidityTransactions(
       })
     );
 
+    // Calculate total tokens in this batch for memo display
+    const batchBaseTotal = batchDeposits.reduce((sum, d) => sum + d.base_in, 0n);
+    const batchQuoteTotal = batchDeposits.reduce((sum, d) => sum + d.quote_in, 0n);
+
+    // Format amounts for display (divide by decimals)
+    const baseDisplay = (Number(batchBaseTotal) / 10 ** baseDecimals).toFixed(4);
+    const quoteDisplay = (Number(batchQuoteTotal) / 10 ** quoteDecimals).toFixed(4);
+
+    // Create descriptive memo showing what's happening
+    const batchNumber = i / BATCH_SIZE + 1;
+    const totalBatches = Math.ceil(allDeposits.length / BATCH_SIZE);
+    const addLiquidityMemoIx = createMemoInstruction(
+      `Adding Liquidity ${batchNumber}/${totalBatches} | Base: ${baseDisplay} | Quote: ${quoteDisplay} | ${batchDeposits.length} bins`
+    );
+
     // Build transaction with compute budget and add_liquidity instruction
     addLiquidityTransactions.push({
       type: "add_liquidity",
       instructions: [
         serializeInstruction(computeUnitLimitIx),
         serializeInstruction(computeUnitPriceIx),
+        serializeInstruction(addLiquidityMemoIx),
         addLiquidityIx,
       ],
     });
@@ -1016,6 +1075,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
         instructions: [
           serializeInstruction(computeUnitLimitIx),
           serializeInstruction(computeUnitPriceIx),
+          serializeInstruction(initPositionMemoIx),
           initPositionIx,
         ],
       },

@@ -717,6 +717,98 @@ export async function buildPoolCreationWithLiquidityTransactions(
     });
   }
 
+  let existingPositionBins: Array<{ pubkey: PublicKey; account: { data: Buffer } }> = [];
+  try {
+    // Fetch all existing position bins for this position
+    // PositionBin account structure:
+    // - discriminator (8 bytes)
+    // - position (32 bytes) <- we filter on this at offset 8
+    // - bin_index (8 bytes, u64 LE) at offset 40
+    const positionFilter = {
+      memcmp: {
+        offset: 8,
+        bytes: positionPda.toBase58(),
+      },
+    };
+
+    const accounts = await connection.getProgramAccounts(PROGRAM_ID, {
+      commitment: "confirmed",
+      filters: [positionFilter],
+    });
+
+    existingPositionBins = accounts.map(acc => ({
+      pubkey: acc.pubkey,
+      account: { data: acc.account.data },
+    }));
+
+    console.log(`[POOL_CREATION] Found ${existingPositionBins.length} existing position bins for position ${positionPda.toBase58()}`);
+  } catch (error) {
+    console.warn(`[POOL_CREATION] Could not fetch existing position bins:`, error);
+    // Continue anyway - this is fine for fresh pools with no existing liquidity
+  }
+
+  // Group existing bins by their BinArray
+  const existingBinArrays = new Map<number, number[]>(); // lowerBinIndex -> binIndices[]
+
+  for (const { account } of existingPositionBins) {
+    // Read bin_index from offset 40 (discriminator=8 + position=32)
+    const binIndexU64 = account.data.readBigUInt64LE(40);
+
+    // Decode from canonical u64 to signed i32
+    // Positive: binIndexU64 < 0x80000000
+    // Negative: binIndexU64 in [0x80000000, 0xFFFFFFFF] (two's complement)
+    const binIndex = binIndexU64 < 0x80000000n
+      ? Number(binIndexU64)
+      : Number(binIndexU64) - 0x100000000;
+
+    // Calculate BinArray lower index (aligned to 64-bin boundaries)
+    const lowerBinIndex = Math.floor(binIndex / 64) * 64;
+
+    if (!existingBinArrays.has(lowerBinIndex)) {
+      existingBinArrays.set(lowerBinIndex, []);
+    }
+    existingBinArrays.get(lowerBinIndex)!.push(binIndex);
+  }
+
+  if (existingBinArrays.size > 0) {
+    console.log(`[POOL_CREATION] Found ${existingBinArrays.size} existing BinArrays:`);
+    for (const [lower, bins] of existingBinArrays.entries()) {
+      console.log(`  BinArray ${lower}: ${bins.length} bins (${bins[0]}-${bins[bins.length - 1]})`);
+    }
+  }
+
+  // Identify which BinArrays are covered by new deposits
+  const newBinArrays = new Set<number>();
+  for (const deposit of depositsRaw) {
+    const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
+    newBinArrays.add(lowerBinIndex);
+  }
+
+  console.log(`[POOL_CREATION] New deposits cover ${newBinArrays.size} BinArrays: [${Array.from(newBinArrays).join(", ")}]`);
+
+  // Add minimum reference deposits (1 lamport) for existing BinArrays NOT in new deposits
+  // This forces those BinArrays into the reconciliation check without significant economic impact
+  const referenceDeposits: Array<{ bin_index: number; base_in: bigint; quote_in: bigint }> = [];
+
+  for (const [lowerBinIndex, bins] of existingBinArrays.entries()) {
+    if (!newBinArrays.has(lowerBinIndex)) {
+      // Pick first bin as representative (Rust program deduplicates BinArrays in HashMap)
+      const representativeBin = bins[0]!;
+
+      referenceDeposits.push({
+        bin_index: representativeBin,
+        base_in: 1n, // 1 lamport minimum (satisfies > 0 requirement)
+        quote_in: 0n,
+      });
+
+      console.log(`[POOL_CREATION] Adding 1-lamport reference deposit for BinArray ${lowerBinIndex} (bin ${representativeBin})`);
+    }
+  }
+
+  // Combine reference deposits + new deposits
+  const allDeposits = [...referenceDeposits, ...depositsRaw];
+  console.log(`[POOL_CREATION] Total deposits: ${allDeposits.length} (${referenceDeposits.length} reference + ${depositsRaw.length} new)`);
+
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
   // Solana tx limit: 1232 bytes serialized
   // Calculation: ~300 bytes overhead + 100 bytes compute budget + (34 bytes × deposits)
@@ -726,8 +818,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const BATCH_SIZE = 8;
   const addLiquidityTransactions: Array<{ type: "add_liquidity"; instructions: SerializedInstruction[] }> = [];
 
-  for (let i = 0; i < depositsRaw.length; i += BATCH_SIZE) {
-    const batchDeposits = depositsRaw.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < allDeposits.length; i += BATCH_SIZE) {
+    const batchDeposits = allDeposits.slice(i, Math.min(i + BATCH_SIZE, allDeposits.length));
 
     // Convert to BN for Borsh encoding
     const deposits = batchDeposits.map(d => ({

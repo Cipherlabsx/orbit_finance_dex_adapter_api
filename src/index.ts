@@ -156,11 +156,9 @@ seedPoolsIntoTradeStore(app.poolsList);
 await initFeesFromDb(app.feesStore, app.poolsList);
 
 /**
- * Initialize price cache with all tokens from registry
+ * Price cache will be initialized by the periodic refresh (every 10 seconds)
+ * No need to block startup on CoinGecko API calls
  */
-const registeredTokens = await dbListTokens();
-const tokenMints = registeredTokens.map((t) => t.mint);
-await initPriceCache(tokenMints);
 
 /**
  * One-time historic backfill

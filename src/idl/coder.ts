@@ -1,4 +1,5 @@
-import { BorshCoder, type Idl } from "@coral-xyz/anchor";
+import anchorPkg, { type Idl } from "@coral-xyz/anchor";
+const { BorshCoder } = anchorPkg;
 import { createRequire } from "node:module";
 
 import type { OrbitFinance } from "./orbit_finance.js";

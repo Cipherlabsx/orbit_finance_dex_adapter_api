@@ -18,7 +18,8 @@ import {
   ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
-import { BorshCoder } from "@coral-xyz/anchor";
+import anchorPkg from "@coral-xyz/anchor";
+const { BorshCoder } = anchorPkg;
 import BN from "bn.js";
 import { ORBIT_IDL } from "../idl/coder.js";
 import { PROGRAM_ID } from "../solana.js";

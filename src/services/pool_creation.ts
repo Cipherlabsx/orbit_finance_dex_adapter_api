@@ -509,27 +509,50 @@ export async function buildPoolCreationWithLiquidityTransactions(
     binArraysNeeded.add(arrayIndex * 128); // Lower bin index of the array
   }
 
-  // Build create_bin_array instructions
-  const createBinArrayInstructions = Array.from(binArraysNeeded).map((lowerBinIdx) => {
-    const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIdx);
+  // Build create_bin_array instructions and batch them
+  // Each create_bin_array instruction is ~150 bytes
+  // Safe batch size: ~5-6 instructions per transaction to stay under 1232 bytes
+  const BIN_ARRAY_BATCH_SIZE = 5;
+  const binArrayIndices = Array.from(binArraysNeeded).sort((a, b) => a - b);
+  const createBinArrayTransactions: Array<{ type: "create_bin_arrays"; instructions: SerializedInstruction[] }> = [];
 
-    const data = coder.instruction.encode("create_bin_array", {
-      lower_bin_index: lowerBinIdx,
+  for (let i = 0; i < binArrayIndices.length; i += BIN_ARRAY_BATCH_SIZE) {
+    const batchIndices = binArrayIndices.slice(i, i + BIN_ARRAY_BATCH_SIZE);
+    const batchInstructions: SerializedInstruction[] = [];
+
+    for (const lowerBinIdx of batchIndices) {
+      const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIdx);
+
+      const data = coder.instruction.encode("create_bin_array", {
+        lower_bin_index: lowerBinIdx,
+      });
+
+      const createBinArrayIx = serializeInstruction(
+        new TransactionInstruction({
+          programId: PROGRAM_ID,
+          keys: [
+            { pubkey: poolPda, isSigner: false, isWritable: true },
+            { pubkey: adminPk, isSigner: true, isWritable: true },
+            { pubkey: binArrayPda, isSigner: false, isWritable: true },
+            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          ],
+          data,
+        })
+      );
+
+      batchInstructions.push(createBinArrayIx);
+    }
+
+    // Add batch transaction
+    createBinArrayTransactions.push({
+      type: "create_bin_arrays",
+      instructions: [
+        serializeInstruction(computeUnitLimitIx),
+        serializeInstruction(computeUnitPriceIx),
+        ...batchInstructions,
+      ],
     });
-
-    return serializeInstruction(
-      new TransactionInstruction({
-        programId: PROGRAM_ID,
-        keys: [
-          { pubkey: poolPda, isSigner: false, isWritable: true },
-          { pubkey: adminPk, isSigner: true, isWritable: true },
-          { pubkey: binArrayPda, isSigner: false, isWritable: true },
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        ],
-        data,
-      })
-    );
-  });
+  }
 
   // Build init_position instruction
   const positionNonce = BigInt(0); // First position for this user in this pool
@@ -616,45 +639,66 @@ export async function buildPoolCreationWithLiquidityTransactions(
   console.log(`[INIT_POSITION_BIN] Creating ${uniqueBinIndices.length} position_bin accounts for bins: ${uniqueBinIndices.join(", ")}`);
 
   const POSITION_BIN_SEED = Buffer.from("position_bin");
-  const initPositionBinInstructions: SerializedInstruction[] = [];
 
-  for (const binIndex of uniqueBinIndices) {
-    // Derive position_bin PDA
-    const binIndexBuffer = Buffer.alloc(8);
-    binIndexBuffer.writeBigUInt64LE(BigInt(binIndex));
-    const [positionBinPda] = PublicKey.findProgramAddressSync(
-      [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
-      PROGRAM_ID
-    );
+  // Batch init_position_bin instructions to avoid transaction size limit
+  // Each init_position_bin instruction is ~150 bytes
+  // Safe batch size: ~5-6 instructions per transaction to stay under 1232 bytes
+  const INIT_BIN_BATCH_SIZE = 5;
+  const initPositionBinTransactions: Array<{ type: "init_position_bins"; instructions: SerializedInstruction[] }> = [];
 
-    // Encode init_position_bin instruction
-    const initPositionBinData = coder.instruction.encode("init_position_bin", {
-      bin_index: new BN(binIndex),
+  for (let i = 0; i < uniqueBinIndices.length; i += INIT_BIN_BATCH_SIZE) {
+    const batchBinIndices = uniqueBinIndices.slice(i, i + INIT_BIN_BATCH_SIZE);
+    const batchInstructions: SerializedInstruction[] = [];
+
+    for (const binIndex of batchBinIndices) {
+      // Derive position_bin PDA
+      const binIndexBuffer = Buffer.alloc(8);
+      binIndexBuffer.writeBigUInt64LE(BigInt(binIndex));
+      const [positionBinPda] = PublicKey.findProgramAddressSync(
+        [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
+        PROGRAM_ID
+      );
+
+      // Encode init_position_bin instruction
+      const initPositionBinData = coder.instruction.encode("init_position_bin", {
+        bin_index: new BN(binIndex),
+      });
+
+      const initPositionBinIx = serializeInstruction(
+        new TransactionInstruction({
+          programId: PROGRAM_ID,
+          keys: [
+            { pubkey: poolPda, isSigner: false, isWritable: true },
+            { pubkey: adminPk, isSigner: true, isWritable: true },
+            { pubkey: positionPda, isSigner: false, isWritable: true },
+            { pubkey: positionBinPda, isSigner: false, isWritable: true },
+            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          ],
+          data: initPositionBinData,
+        })
+      );
+
+      batchInstructions.push(initPositionBinIx);
+    }
+
+    // Add batch transaction
+    initPositionBinTransactions.push({
+      type: "init_position_bins",
+      instructions: [
+        serializeInstruction(computeUnitLimitIx),
+        serializeInstruction(computeUnitPriceIx),
+        ...batchInstructions,
+      ],
     });
-
-    const initPositionBinIx = serializeInstruction(
-      new TransactionInstruction({
-        programId: PROGRAM_ID,
-        keys: [
-          { pubkey: poolPda, isSigner: false, isWritable: true },
-          { pubkey: adminPk, isSigner: true, isWritable: true },
-          { pubkey: positionPda, isSigner: false, isWritable: true },
-          { pubkey: positionBinPda, isSigner: false, isWritable: true },
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        ],
-        data: initPositionBinData,
-      })
-    );
-
-    initPositionBinInstructions.push(initPositionBinIx);
   }
 
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
   // Solana tx limit: 1232 bytes serialized
   // Calculation: ~300 bytes overhead + 100 bytes compute budget + (34 bytes × deposits)
   // With compute budget: 400 + (34 × deposits) must be < 1232
-  // Max safe: (1232 - 400) / 34 = ~24, but using 15 for extra safety margin
-  const BATCH_SIZE = 15;
+  // Max safe: (1232 - 400) / 34 = ~24, but using 8 for extra safety margin
+  // Reduced from 15 to 8 to account for ATA creation instructions being prepended
+  const BATCH_SIZE = 8;
   const addLiquidityTransactions: Array<{ type: "add_liquidity"; instructions: SerializedInstruction[] }> = [];
 
   for (let i = 0; i < depositsRaw.length; i += BATCH_SIZE) {
@@ -732,14 +776,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
     ...baseResult,
     transactions: [
       ...baseResult.transactions,
-      {
-        type: "create_bin_arrays",
-        instructions: [
-          serializeInstruction(computeUnitLimitIx),
-          serializeInstruction(computeUnitPriceIx),
-          ...createBinArrayInstructions,
-        ],
-      },
+      ...createBinArrayTransactions,
       {
         type: "init_position",
         instructions: [
@@ -748,14 +785,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
           initPositionIx,
         ],
       },
-      {
-        type: "init_position_bins",
-        instructions: [
-          serializeInstruction(computeUnitLimitIx),
-          serializeInstruction(computeUnitPriceIx),
-          ...initPositionBinInstructions,
-        ],
-      },
+      ...initPositionBinTransactions,
       ...addLiquidityTransactions,
     ],
     positionAddress: positionPda.toBase58(),

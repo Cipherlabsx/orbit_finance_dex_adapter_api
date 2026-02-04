@@ -342,8 +342,7 @@ export async function buildPoolCreationTransactions(
   const quoteMintPk = new PublicKey(quoteMint);
 
   // Validate inputs
-  // TESTING: Canonical order validation temporarily disabled to test on-chain program requirements
-  // validateCanonicalOrder(baseMintPk, quoteMintPk);
+  validateCanonicalOrder(baseMintPk, quoteMintPk);
   validateBinStep(binStepBps);
   validateFeeConfig(feeConfig);
 
@@ -608,9 +607,10 @@ export async function buildPoolCreationWithLiquidityTransactions(
   );
 
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
-  // Each deposit is ~32 bytes (4 BN × 8 bytes). Solana tx limit is 1232 bytes.
-  // Safe batch size is ~15 deposits per transaction (480 bytes for deposits + overhead)
-  const BATCH_SIZE = 15;
+  // Solana tx limit: 1232 bytes serialized
+  // Calculation: ~300 bytes overhead + (34 bytes × deposits)
+  // Max theoretical: ~27 deposits, using 25 for safety margin
+  const BATCH_SIZE = 25;
   const addLiquidityTransactions: Array<{ type: "add_liquidity"; instructions: SerializedInstruction[] }> = [];
 
   for (let i = 0; i < depositsRaw.length; i += BATCH_SIZE) {

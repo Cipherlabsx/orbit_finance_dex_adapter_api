@@ -17,7 +17,7 @@ import {
   SystemProgram,
   ComputeBudgetProgram,
 } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { TOKEN_PROGRAM_ID, createAssociatedTokenAccountInstruction } from "@solana/spl-token";
 import anchorPkg from "@coral-xyz/anchor";
 const { BorshCoder } = anchorPkg;
 import BN from "bn.js";
@@ -597,14 +597,36 @@ export async function buildPoolCreationWithLiquidityTransactions(
   }
 
   // Derive owner's token accounts (ATAs)
+  const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
   const [ownerBaseAta] = PublicKey.findProgramAddressSync(
     [adminPk.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), baseMintPk.toBuffer()],
-    new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL") // Associated Token Program
+    ASSOCIATED_TOKEN_PROGRAM_ID
   );
 
   const [ownerQuoteAta] = PublicKey.findProgramAddressSync(
     [adminPk.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), quoteMintPk.toBuffer()],
-    new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+
+  // Create ATA instructions (these are idempotent - if account exists, instruction will succeed)
+  // We'll add these to the first add_liquidity transaction
+  const createBaseAtaIx = createAssociatedTokenAccountInstruction(
+    adminPk, // payer
+    ownerBaseAta, // ata
+    adminPk, // owner
+    baseMintPk, // mint
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+
+  const createQuoteAtaIx = createAssociatedTokenAccountInstruction(
+    adminPk, // payer
+    ownerQuoteAta, // ata
+    adminPk, // owner
+    quoteMintPk, // mint
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID
   );
 
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
@@ -647,13 +669,25 @@ export async function buildPoolCreationWithLiquidityTransactions(
       })
     );
 
+    // For the first batch, prepend ATA creation instructions
+    const isFirstBatch = i === 0;
+    const instructions = isFirstBatch
+      ? [
+          serializeInstruction(computeUnitLimitIx),
+          serializeInstruction(computeUnitPriceIx),
+          serializeInstruction(createBaseAtaIx),
+          serializeInstruction(createQuoteAtaIx),
+          addLiquidityIx,
+        ]
+      : [
+          serializeInstruction(computeUnitLimitIx),
+          serializeInstruction(computeUnitPriceIx),
+          addLiquidityIx,
+        ];
+
     addLiquidityTransactions.push({
       type: "add_liquidity",
-      instructions: [
-        serializeInstruction(computeUnitLimitIx),
-        serializeInstruction(computeUnitPriceIx),
-        addLiquidityIx,
-      ],
+      instructions,
     });
   }
 

@@ -77,7 +77,7 @@ export type PoolCreationWithLiquidityParams = PoolCreationParams & {
  */
 export type PoolCreationResult = {
   transactions: Array<{
-    type: "init_pool" | "init_pool_vaults" | "create_bin_arrays" | "init_position" | "add_liquidity";
+    type: "init_pool" | "init_pool_vaults" | "create_bin_arrays" | "init_position" | "init_position_bins" | "add_liquidity";
     instructions: SerializedInstruction[];
   }>;
   poolAddress: string;
@@ -610,6 +610,45 @@ export async function buildPoolCreationWithLiquidityTransactions(
     ASSOCIATED_TOKEN_PROGRAM_ID
   );
 
+  // Collect unique bin indices and create init_position_bin instructions
+  // CRITICAL: Position bins must be initialized before add_liquidity_v2 can use them
+  const uniqueBinIndices = Array.from(new Set(depositsRaw.map(d => d.bin_index))).sort((a, b) => a - b);
+  console.log(`[INIT_POSITION_BIN] Creating ${uniqueBinIndices.length} position_bin accounts for bins: ${uniqueBinIndices.join(", ")}`);
+
+  const POSITION_BIN_SEED = Buffer.from("position_bin");
+  const initPositionBinInstructions: SerializedInstruction[] = [];
+
+  for (const binIndex of uniqueBinIndices) {
+    // Derive position_bin PDA
+    const binIndexBuffer = Buffer.alloc(8);
+    binIndexBuffer.writeBigUInt64LE(BigInt(binIndex));
+    const [positionBinPda] = PublicKey.findProgramAddressSync(
+      [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
+      PROGRAM_ID
+    );
+
+    // Encode init_position_bin instruction
+    const initPositionBinData = coder.instruction.encode("init_position_bin", {
+      bin_index: new BN(binIndex),
+    });
+
+    const initPositionBinIx = serializeInstruction(
+      new TransactionInstruction({
+        programId: PROGRAM_ID,
+        keys: [
+          { pubkey: poolPda, isSigner: false, isWritable: true },
+          { pubkey: adminPk, isSigner: true, isWritable: true },
+          { pubkey: positionPda, isSigner: false, isWritable: true },
+          { pubkey: positionBinPda, isSigner: false, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data: initPositionBinData,
+      })
+    );
+
+    initPositionBinInstructions.push(initPositionBinIx);
+  }
+
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
   // Solana tx limit: 1232 bytes serialized
   // Calculation: ~300 bytes overhead + 100 bytes compute budget + (34 bytes × deposits)
@@ -633,6 +672,32 @@ export async function buildPoolCreationWithLiquidityTransactions(
       deposits,
     });
 
+    // Build remaining accounts in the pattern: [bin_array_0, position_bin_0, bin_array_1, position_bin_1, ...]
+    // The program expects deposits.len() * 2 accounts
+    const POSITION_BIN_SEED = Buffer.from("position_bin");
+    const remainingAccounts = [];
+
+    for (const deposit of batchDeposits) {
+      // Derive bin_array PDA
+      const lowerBinIndex = Math.floor(deposit.bin_index / 128) * 128; // 128 bins per array
+      const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIndex);
+
+      // Derive position_bin PDA
+      // Seeds: ["position_bin", position_key, bin_index (u64 LE)]
+      const binIndexBuffer = Buffer.alloc(8);
+      binIndexBuffer.writeBigUInt64LE(BigInt(deposit.bin_index));
+      const [positionBinPda] = PublicKey.findProgramAddressSync(
+        [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
+        PROGRAM_ID
+      );
+
+      // Add in the required pattern: bin_array, position_bin
+      remainingAccounts.push(
+        { pubkey: binArrayPda, isSigner: false, isWritable: true },
+        { pubkey: positionBinPda, isSigner: false, isWritable: true }
+      );
+    }
+
     const addLiquidityIx = serializeInstruction(
       new TransactionInstruction({
         programId: PROGRAM_ID,
@@ -645,6 +710,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
           { pubkey: quoteVaultPda, isSigner: false, isWritable: true },
           { pubkey: positionPda, isSigner: false, isWritable: true },
           { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          // Remaining accounts: [bin_array_0, position_bin_0, bin_array_1, position_bin_1, ...]
+          ...remainingAccounts,
         ],
         data: addLiquidityData,
       })
@@ -679,6 +746,14 @@ export async function buildPoolCreationWithLiquidityTransactions(
           serializeInstruction(computeUnitLimitIx),
           serializeInstruction(computeUnitPriceIx),
           initPositionIx,
+        ],
+      },
+      {
+        type: "init_position_bins",
+        instructions: [
+          serializeInstruction(computeUnitLimitIx),
+          serializeInstruction(computeUnitPriceIx),
+          ...initPositionBinInstructions,
         ],
       },
       ...addLiquidityTransactions,

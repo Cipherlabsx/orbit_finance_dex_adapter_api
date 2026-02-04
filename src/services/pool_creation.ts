@@ -609,9 +609,10 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
   // Solana tx limit: 1232 bytes serialized
-  // Calculation: ~300 bytes overhead + (34 bytes × deposits)
-  // Max theoretical: ~27 deposits, using 25 for safety margin
-  const BATCH_SIZE = 25;
+  // Calculation: ~300 bytes overhead + 100 bytes compute budget + (34 bytes × deposits)
+  // With compute budget: 400 + (34 × deposits) must be < 1232
+  // Max safe: (1232 - 400) / 34 = ~24, but using 15 for extra safety margin
+  const BATCH_SIZE = 15;
   const addLiquidityTransactions: Array<{ type: "add_liquidity"; instructions: SerializedInstruction[] }> = [];
 
   for (let i = 0; i < depositsRaw.length; i += BATCH_SIZE) {

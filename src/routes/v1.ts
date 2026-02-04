@@ -19,6 +19,7 @@ import { calculateHolderClaimable, calculateNftClaimable } from "../services/rew
 import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, type FeeConfig } from "../services/pool_creation.js";
 import { readPool } from "../services/pool_reader.js";
 import { upsertDexPool } from "../supabase.js";
+import { connection } from "../solana.js";
 
 /**
  * Small helper: choose pool set.
@@ -416,7 +417,7 @@ export async function v1Routes(app: FastifyInstance) {
             binsLeft: body.binsLeft!,
             binsRight: body.binsRight!,
             priorityLevel: body.settings?.priorityLevel ?? "turbo",
-          })
+          }, connection)
         : await buildPoolCreationTransactions({
             admin: body.admin,
             creator: body.creator,

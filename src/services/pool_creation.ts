@@ -12,6 +12,7 @@
  */
 
 import {
+  Connection,
   PublicKey,
   TransactionInstruction,
   SystemProgram,
@@ -464,7 +465,8 @@ export async function buildPoolCreationTransactions(
  * 5. add_liquidity: Deposits tokens into bins
  */
 export async function buildPoolCreationWithLiquidityTransactions(
-  params: PoolCreationWithLiquidityParams
+  params: PoolCreationWithLiquidityParams,
+  connection: Connection
 ): Promise<PoolCreationResult> {
   const {
     admin,
@@ -509,15 +511,23 @@ export async function buildPoolCreationWithLiquidityTransactions(
     binArraysNeeded.add(arrayIndex * 64); // Lower bin index of the array
   }
 
+  // Check which bin arrays already exist on-chain
+  const binArrayIndices = Array.from(binArraysNeeded).sort((a, b) => a - b);
+  const binArrayPdas = binArrayIndices.map(lowerBinIdx => deriveBinArrayPda(poolPda, lowerBinIdx)[0]);
+  const binArrayInfos = await connection.getMultipleAccountsInfo(binArrayPdas, "confirmed");
+
+  // Filter to only bin arrays that DON'T exist yet
+  const binArrayIndicesToCreate = binArrayIndices.filter((_, idx) => !binArrayInfos[idx]);
+  console.log(`[BIN_ARRAYS] Need ${binArrayIndices.length} bin arrays, ${binArrayIndicesToCreate.length} missing, ${binArrayIndices.length - binArrayIndicesToCreate.length} already exist`);
+
   // Build create_bin_array instructions and batch them
   // Each create_bin_array instruction is ~150 bytes
   // Safe batch size: ~5-6 instructions per transaction to stay under 1232 bytes
   const BIN_ARRAY_BATCH_SIZE = 5;
-  const binArrayIndices = Array.from(binArraysNeeded).sort((a, b) => a - b);
   const createBinArrayTransactions: Array<{ type: "create_bin_arrays"; instructions: SerializedInstruction[] }> = [];
 
-  for (let i = 0; i < binArrayIndices.length; i += BIN_ARRAY_BATCH_SIZE) {
-    const batchIndices = binArrayIndices.slice(i, i + BIN_ARRAY_BATCH_SIZE);
+  for (let i = 0; i < binArrayIndicesToCreate.length; i += BIN_ARRAY_BATCH_SIZE) {
+    const batchIndices = binArrayIndicesToCreate.slice(i, i + BIN_ARRAY_BATCH_SIZE);
     const batchInstructions: SerializedInstruction[] = [];
 
     for (const lowerBinIdx of batchIndices) {
@@ -636,9 +646,24 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Collect unique bin indices and create init_position_bin instructions
   // CRITICAL: Position bins must be initialized before add_liquidity_v2 can use them
   const uniqueBinIndices = Array.from(new Set(depositsRaw.map(d => d.bin_index))).sort((a, b) => a - b);
-  console.log(`[INIT_POSITION_BIN] Creating ${uniqueBinIndices.length} position_bin accounts for bins: ${uniqueBinIndices.join(", ")}`);
+  console.log(`[INIT_POSITION_BIN] Need ${uniqueBinIndices.length} position_bin accounts for bins: ${uniqueBinIndices.join(", ")}`);
 
   const POSITION_BIN_SEED = Buffer.from("position_bin");
+
+  // Check which position bins already exist on-chain
+  const positionBinPdas = uniqueBinIndices.map(binIndex => {
+    const binIndexBuffer = Buffer.alloc(8);
+    binIndexBuffer.writeBigUInt64LE(BigInt(binIndex));
+    return PublicKey.findProgramAddressSync(
+      [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
+      PROGRAM_ID
+    )[0];
+  });
+  const positionBinInfos = await connection.getMultipleAccountsInfo(positionBinPdas, "confirmed");
+
+  // Filter to only position bins that DON'T exist yet
+  const binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
+  console.log(`[POSITION_BINS] ${binIndicesToCreate.length} missing, ${uniqueBinIndices.length - binIndicesToCreate.length} already exist`);
 
   // Batch init_position_bin instructions to avoid transaction size limit
   // Each init_position_bin instruction is ~150 bytes
@@ -646,8 +671,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const INIT_BIN_BATCH_SIZE = 5;
   const initPositionBinTransactions: Array<{ type: "init_position_bins"; instructions: SerializedInstruction[] }> = [];
 
-  for (let i = 0; i < uniqueBinIndices.length; i += INIT_BIN_BATCH_SIZE) {
-    const batchBinIndices = uniqueBinIndices.slice(i, i + INIT_BIN_BATCH_SIZE);
+  for (let i = 0; i < binIndicesToCreate.length; i += INIT_BIN_BATCH_SIZE) {
+    const batchBinIndices = binIndicesToCreate.slice(i, i + INIT_BIN_BATCH_SIZE);
     const batchInstructions: SerializedInstruction[] = [];
 
     for (const binIndex of batchBinIndices) {

@@ -749,25 +749,95 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   // Group existing bins by their BinArray
   const existingBinArrays = new Map<number, number[]>(); // lowerBinIndex -> binIndices[]
+  let skippedAccounts = 0;
 
   for (const { account } of existingPositionBins) {
-    // Read bin_index from offset 40 (discriminator=8 + position=32)
-    const binIndexU64 = account.data.readBigUInt64LE(40);
+    try {
+      // STRICT: Validate minimum account data length
+      // PositionBin structure: discriminator(8) + position(32) + bin_index(8) + shares(8) + ... = minimum 56 bytes
+      if (account.data.length < 56) {
+        console.warn(
+          `[POOL_CREATION] INVALID: Position bin account data too short (${account.data.length} bytes, need >= 56). ` +
+          `This indicates wrong account type. SKIPPING.`
+        );
+        skippedAccounts++;
+        continue;
+      }
 
-    // Decode from canonical u64 to signed i32
-    // Positive: binIndexU64 < 0x80000000
-    // Negative: binIndexU64 in [0x80000000, 0xFFFFFFFF] (two's complement)
-    const binIndex = binIndexU64 < 0x80000000n
-      ? Number(binIndexU64)
-      : Number(binIndexU64) - 0x100000000;
+      // STRICT: Validate account discriminator
+      // First 8 bytes should be the account discriminator (derived from account name hash)
+      // If all zeros or clearly invalid, this is not a PositionBin account
+      const discriminator = account.data.slice(0, 8);
+      const isAllZeros = discriminator.every(byte => byte === 0);
+      const isAllOnes = discriminator.every(byte => byte === 0xFF);
 
-    // Calculate BinArray lower index (aligned to 64-bin boundaries)
-    const lowerBinIndex = Math.floor(binIndex / 64) * 64;
+      if (isAllZeros || isAllOnes) {
+        console.warn(
+          `[POOL_CREATION] INVALID: Account has invalid discriminator (all zeros or all ones). ` +
+          `This indicates wrong account type. SKIPPING.`
+        );
+        skippedAccounts++;
+        continue;
+      }
 
-    if (!existingBinArrays.has(lowerBinIndex)) {
-      existingBinArrays.set(lowerBinIndex, []);
+      // Read bin_index from offset 40 (discriminator=8 + position=32)
+      const binIndexU64 = account.data.readBigUInt64LE(40);
+
+      // STRICT VALIDATION: Check if raw u64 value is garbage data
+      // Valid bin indices must fit in i32 range when encoded as u64:
+      // - Positive: 0 to 0x7FFFFFFF (2,147,483,647)
+      // - Negative (two's complement): 0x80000000 to 0xFFFFFFFF
+      // Any value > 0xFFFFFFFF (4,294,967,295) is invalid and indicates wrong account type or corrupted data
+      if (binIndexU64 > 0xFFFFFFFFn) {
+        // Log detailed account info to diagnose the issue
+        const accountPubkey = existingPositionBins.find(pb => pb.account === account)?.pubkey?.toBase58() || 'unknown';
+        const discriminatorHex = Array.from(discriminator).map(b => b.toString(16).padStart(2, '0')).join('');
+
+        console.warn(
+          `[POOL_CREATION] INVALID ACCOUNT DETECTED:\n` +
+          `  Account: ${accountPubkey}\n` +
+          `  Discriminator (hex): ${discriminatorHex}\n` +
+          `  bin_index u64: ${binIndexU64} (0x${binIndexU64.toString(16)})\n` +
+          `  Expected: <= ${0xFFFFFFFFn} (0xFFFFFFFF)\n` +
+          `  Likely cause: Wrong account type matched by memcmp filter\n` +
+          `  Action: SKIPPING - will not include in accounting`
+        );
+        skippedAccounts++;
+        continue;
+      }
+
+      // Decode from canonical u64 to signed i32
+      // Positive: binIndexU64 < 0x80000000
+      // Negative: binIndexU64 in [0x80000000, 0xFFFFFFFF] (two's complement)
+      const binIndex = binIndexU64 < 0x80000000n
+        ? Number(binIndexU64)
+        : Number(binIndexU64) - 0x100000000;
+
+      // Calculate BinArray lower index (aligned to 64-bin boundaries)
+      const lowerBinIndex = Math.floor(binIndex / 64) * 64;
+
+      if (!existingBinArrays.has(lowerBinIndex)) {
+        existingBinArrays.set(lowerBinIndex, []);
+      }
+      existingBinArrays.get(lowerBinIndex)!.push(binIndex);
+    } catch (error) {
+      console.warn(`[POOL_CREATION] Failed to parse position bin account:`, error);
+      skippedAccounts++;
+      continue;
     }
-    existingBinArrays.get(lowerBinIndex)!.push(binIndex);
+  }
+
+  // Report on skipped accounts
+  if (skippedAccounts > 0) {
+    console.warn(
+      `[POOL_CREATION] ⚠️  SKIPPED ${skippedAccounts} invalid account(s) out of ${existingPositionBins.length} total.\n` +
+      `  Valid accounts: ${existingPositionBins.length - skippedAccounts}\n` +
+      `  If vault reconciliation fails, check logs above to see why accounts were skipped.\n` +
+      `  Possible causes:\n` +
+      `    1. Wrong account type matched by memcmp filter (normal, safe to skip)\n` +
+      `    2. Corrupted on-chain data (unfixable, pool may be broken)\n` +
+      `    3. Bug in our parsing logic (fixable, report this)`
+    );
   }
 
   if (existingBinArrays.size > 0) {
@@ -792,8 +862,14 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   for (const [lowerBinIndex, bins] of existingBinArrays.entries()) {
     if (!newBinArrays.has(lowerBinIndex)) {
+      // Validate bins array is not empty
+      if (bins.length === 0) {
+        console.warn(`[POOL_CREATION] BinArray ${lowerBinIndex} has no bins, skipping reference deposit`);
+        continue;
+      }
+
       // Pick first bin as representative (Rust program deduplicates BinArrays in HashMap)
-      const representativeBin = bins[0]!;
+      const representativeBin = bins[0];
 
       referenceDeposits.push({
         bin_index: representativeBin,
@@ -822,12 +898,53 @@ export async function buildPoolCreationWithLiquidityTransactions(
     const batchDeposits = allDeposits.slice(i, Math.min(i + BATCH_SIZE, allDeposits.length));
 
     // Convert to BN for Borsh encoding
-    const deposits = batchDeposits.map(d => ({
-      bin_index: new BN(d.bin_index),
-      base_in: new BN(d.base_in.toString()),
-      quote_in: new BN(d.quote_in.toString()),
-      min_shares_out: new BN(0), // No slippage protection for initial liquidity
-    }));
+    // STRICT: Validate each deposit before BN construction to prevent crashes
+    const deposits: Array<{ bin_index: BN; base_in: BN; quote_in: BN; min_shares_out: BN }> = [];
+
+    for (const d of batchDeposits) {
+      try {
+        // STRICT: Pre-validate bin_index before BN construction
+        if (typeof d.bin_index !== 'number' || !Number.isFinite(d.bin_index)) {
+          throw new Error(`Invalid bin_index type: ${typeof d.bin_index} (value: ${d.bin_index})`);
+        }
+
+        if (d.bin_index < -2147483648 || d.bin_index > 2147483647) {
+          throw new Error(`bin_index ${d.bin_index} out of i32 range (-2147483648 to 2147483647)`);
+        }
+
+        // STRICT: Pre-validate amounts before BN construction
+        if (typeof d.base_in !== 'bigint' || typeof d.quote_in !== 'bigint') {
+          throw new Error(`Invalid amount types: base_in=${typeof d.base_in}, quote_in=${typeof d.quote_in}`);
+        }
+
+        if (d.base_in < 0n || d.quote_in < 0n) {
+          throw new Error(`Negative amounts not allowed: base_in=${d.base_in}, quote_in=${d.quote_in}`);
+        }
+
+        // Construct BNs with error handling
+        deposits.push({
+          bin_index: new BN(d.bin_index),
+          base_in: new BN(d.base_in.toString()),
+          quote_in: new BN(d.quote_in.toString()),
+          min_shares_out: new BN(0),
+        });
+      } catch (error) {
+        // CRITICAL: Log and skip invalid deposits instead of crashing
+        console.error(
+          `[POOL_CREATION] CRITICAL: Failed to create BN for deposit`,
+          { bin_index: d.bin_index, base_in: d.base_in, quote_in: d.quote_in, error }
+        );
+        throw new Error(
+          `Invalid deposit data at bin ${d.bin_index}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    // Skip empty batches (all deposits were invalid)
+    if (deposits.length === 0) {
+      console.warn(`[POOL_CREATION] Batch ${i / BATCH_SIZE + 1} has no valid deposits, skipping`);
+      continue;
+    }
 
     const addLiquidityData = coder.instruction.encode("add_liquidity_v2", {
       deposits,

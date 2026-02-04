@@ -505,8 +505,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Determine which bin arrays we need to create
   const binArraysNeeded = new Set<number>();
   for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
-    const arrayIndex = Math.floor(binIndex / 128); // Each bin array holds 128 bins
-    binArraysNeeded.add(arrayIndex * 128); // Lower bin index of the array
+    const arrayIndex = Math.floor(binIndex / 64); // Each bin array holds 64 bins (BIN_ARRAY_SIZE)
+    binArraysNeeded.add(arrayIndex * 64); // Lower bin index of the array
   }
 
   // Build create_bin_array instructions and batch them
@@ -723,7 +723,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
     for (const deposit of batchDeposits) {
       // Derive bin_array PDA
-      const lowerBinIndex = Math.floor(deposit.bin_index / 128) * 128; // 128 bins per array
+      const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64; // 64 bins per array (BIN_ARRAY_SIZE)
       const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIndex);
 
       // Derive position_bin PDA

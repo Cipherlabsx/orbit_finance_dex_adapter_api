@@ -706,6 +706,66 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
   console.log(`[POSITION_BINS] ${binIndicesToCreate.length} missing, ${uniqueBinIndices.length - binIndicesToCreate.length} already exist`);
 
+  // CRITICAL FIX: Detect if ANY position bins already exist (indicates this is a resume/add more liquidity scenario)
+  const hasExistingBins = positionBinInfos.some(info => info !== null);
+  const existingBinCount = positionBinInfos.filter(info => info !== null).length;
+  console.log(`[ACCOUNTING_FIX] Position has existing bins: ${hasExistingBins}, count in sampled range: ${existingBinCount}/${uniqueBinIndices.length}`);
+
+  // ROBUST FIX: If existing liquidity detected, scan WIDER RANGE to find ALL existing BinArrays
+  // This ensures we don't miss liquidity that's far from current deposits
+  let allExistingBinIndices: number[] = [];
+
+  if (hasExistingBins) {
+    console.log(`[ACCOUNTING_FIX] Scanning wider range to find all existing position bins...`);
+
+    // Calculate scan range: ±10 BinArrays (±640 bins) from new deposits
+    // This covers most realistic scenarios while staying performant
+    const newBinIndices = depositsRaw.map(d => d.bin_index);
+    const minNewBin = Math.min(...newBinIndices);
+    const maxNewBin = Math.max(...newBinIndices);
+    const SCAN_RANGE_BINS = 640; // 10 BinArrays × 64 bins
+
+    const scanMinBin = minNewBin - SCAN_RANGE_BINS;
+    const scanMaxBin = maxNewBin + SCAN_RANGE_BINS;
+
+    // Generate all possible bin indices in scan range (sample every 8 bins for performance)
+    const binsToCheck: number[] = [];
+    for (let bin = scanMinBin; bin <= scanMaxBin; bin += 8) {
+      binsToCheck.push(bin);
+    }
+
+    console.log(`[ACCOUNTING_FIX] Checking ${binsToCheck.length} bins in range [${scanMinBin}, ${scanMaxBin}]`);
+
+    // Derive PDAs for all bins in scan range
+    const scanPdas = binsToCheck.map(binIndex => {
+      const binIndexBuffer = Buffer.alloc(8);
+      binIndexBuffer.writeBigUInt64LE(BigInt(binIndex));
+      return PublicKey.findProgramAddressSync(
+        [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
+        PROGRAM_ID
+      )[0];
+    });
+
+    // Fetch in batches of 100 to avoid RPC limits
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < scanPdas.length; i += BATCH_SIZE) {
+      const batch = scanPdas.slice(i, Math.min(i + BATCH_SIZE, scanPdas.length));
+      const batchResults = await connection.getMultipleAccountsInfo(batch, "confirmed");
+
+      // Record which bins exist
+      batchResults.forEach((info, idx) => {
+        if (info !== null) {
+          const binIndex = binsToCheck[i + idx];
+          if (!newBinIndices.includes(binIndex)) {
+            allExistingBinIndices.push(binIndex);
+          }
+        }
+      });
+    }
+
+    console.log(`[ACCOUNTING_FIX] Found ${allExistingBinIndices.length} existing bins outside new deposit range`);
+  }
+
   // Batch init_position_bin instructions to avoid transaction size limit
   // Each init_position_bin instruction is ~150 bytes
   // Safe batch size: ~5-6 instructions per transaction to stay under 1232 bytes
@@ -764,130 +824,16 @@ export async function buildPoolCreationWithLiquidityTransactions(
     });
   }
 
-  console.log(`[POOL_CREATION] About to fetch existing position bins for position: ${positionPda.toBase58()}`);
-  let existingPositionBins: Array<{ pubkey: PublicKey; account: { data: Buffer } }> = [];
-  try {
-    // Fetch all existing position bins for this position
-    // PositionBin account structure:
-    // - discriminator (8 bytes)
-    // - position (32 bytes) <- we filter on this at offset 8
-    // - bin_index (8 bytes, u64 LE) at offset 40
-    const positionFilter = {
-      memcmp: {
-        offset: 8,
-        bytes: positionPda.toBase58(),
-      },
-    };
-
-    console.log(`[POOL_CREATION] Calling connection.getProgramAccounts with filter...`);
-    const accounts = await connection.getProgramAccounts(PROGRAM_ID, {
-      commitment: "confirmed",
-      filters: [positionFilter],
-    });
-    console.log(`[POOL_CREATION] getProgramAccounts returned ${accounts.length} accounts`);
-
-    existingPositionBins = accounts.map(acc => ({
-      pubkey: acc.pubkey,
-      account: { data: acc.account.data },
-    }));
-
-    console.log(`[POOL_CREATION] Found ${existingPositionBins.length} existing position bins for position ${positionPda.toBase58()}`);
-  } catch (error) {
-    console.warn(`[POOL_CREATION] Could not fetch existing position bins:`, error);
-    // Continue anyway - this is fine for fresh pools with no existing liquidity
-  }
-
   // Group existing bins by their BinArray
   const existingBinArrays = new Map<number, number[]>(); // lowerBinIndex -> binIndices[]
-  let skippedAccounts = 0;
 
-  for (const { account } of existingPositionBins) {
-    try {
-      // STRICT: Validate minimum account data length
-      // PositionBin structure: discriminator(8) + position(32) + bin_index(8) + shares(8) + ... = minimum 56 bytes
-      if (account.data.length < 56) {
-        console.warn(
-          `[POOL_CREATION] INVALID: Position bin account data too short (${account.data.length} bytes, need >= 56). ` +
-          `This indicates wrong account type. SKIPPING.`
-        );
-        skippedAccounts++;
-        continue;
-      }
+  for (const binIndex of allExistingBinIndices) {
+    const lowerBinIndex = Math.floor(binIndex / 64) * 64;
 
-      // STRICT: Validate account discriminator
-      // First 8 bytes should be the account discriminator (derived from account name hash)
-      // If all zeros or clearly invalid, this is not a PositionBin account
-      const discriminator = account.data.slice(0, 8);
-      const isAllZeros = discriminator.every(byte => byte === 0);
-      const isAllOnes = discriminator.every(byte => byte === 0xFF);
-
-      if (isAllZeros || isAllOnes) {
-        console.warn(
-          `[POOL_CREATION] INVALID: Account has invalid discriminator (all zeros or all ones). ` +
-          `This indicates wrong account type. SKIPPING.`
-        );
-        skippedAccounts++;
-        continue;
-      }
-
-      // Read bin_index from offset 40 (discriminator=8 + position=32)
-      const binIndexU64 = account.data.readBigUInt64LE(40);
-
-      // STRICT VALIDATION: Check if raw u64 value is garbage data
-      // Valid bin indices must fit in i32 range when encoded as u64:
-      // - Positive: 0 to 0x7FFFFFFF (2,147,483,647)
-      // - Negative (two's complement): 0x80000000 to 0xFFFFFFFF
-      // Any value > 0xFFFFFFFF (4,294,967,295) is invalid and indicates wrong account type or corrupted data
-      if (binIndexU64 > 0xFFFFFFFFn) {
-        // Log detailed account info to diagnose the issue
-        const accountPubkey = existingPositionBins.find(pb => pb.account === account)?.pubkey?.toBase58() || 'unknown';
-        const discriminatorHex = Array.from(discriminator).map(b => b.toString(16).padStart(2, '0')).join('');
-
-        console.warn(
-          `[POOL_CREATION] INVALID ACCOUNT DETECTED:\n` +
-          `  Account: ${accountPubkey}\n` +
-          `  Discriminator (hex): ${discriminatorHex}\n` +
-          `  bin_index u64: ${binIndexU64} (0x${binIndexU64.toString(16)})\n` +
-          `  Expected: <= ${0xFFFFFFFFn} (0xFFFFFFFF)\n` +
-          `  Likely cause: Wrong account type matched by memcmp filter\n` +
-          `  Action: SKIPPING - will not include in accounting`
-        );
-        skippedAccounts++;
-        continue;
-      }
-
-      // Decode from canonical u64 to signed i32
-      // Positive: binIndexU64 < 0x80000000
-      // Negative: binIndexU64 in [0x80000000, 0xFFFFFFFF] (two's complement)
-      const binIndex = binIndexU64 < 0x80000000n
-        ? Number(binIndexU64)
-        : Number(binIndexU64) - 0x100000000;
-
-      // Calculate BinArray lower index (aligned to 64-bin boundaries)
-      const lowerBinIndex = Math.floor(binIndex / 64) * 64;
-
-      if (!existingBinArrays.has(lowerBinIndex)) {
-        existingBinArrays.set(lowerBinIndex, []);
-      }
-      existingBinArrays.get(lowerBinIndex)!.push(binIndex);
-    } catch (error) {
-      console.warn(`[POOL_CREATION] Failed to parse position bin account:`, error);
-      skippedAccounts++;
-      continue;
+    if (!existingBinArrays.has(lowerBinIndex)) {
+      existingBinArrays.set(lowerBinIndex, []);
     }
-  }
-
-  // Report on skipped accounts
-  if (skippedAccounts > 0) {
-    console.warn(
-      `[POOL_CREATION] ⚠️  SKIPPED ${skippedAccounts} invalid account(s) out of ${existingPositionBins.length} total.\n` +
-      `  Valid accounts: ${existingPositionBins.length - skippedAccounts}\n` +
-      `  If vault reconciliation fails, check logs above to see why accounts were skipped.\n` +
-      `  Possible causes:\n` +
-      `    1. Wrong account type matched by memcmp filter (normal, safe to skip)\n` +
-      `    2. Corrupted on-chain data (unfixable, pool may be broken)\n` +
-      `    3. Bug in our parsing logic (fixable, report this)`
-    );
+    existingBinArrays.get(lowerBinIndex)!.push(binIndex);
   }
 
   if (existingBinArrays.size > 0) {

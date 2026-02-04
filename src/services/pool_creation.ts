@@ -424,7 +424,7 @@ export async function buildPoolCreationTransactions(
 
   // Add compute budget instructions
   const priorityFeeMicroLamports = getPriorityFeeMicroLamports(priorityLevel);
-  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
+  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 });
   const computeUnitPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports });
 
   return {
@@ -490,7 +490,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   const coder = new BorshCoder(ORBIT_IDL);
   const priorityFeeMicroLamports = getPriorityFeeMicroLamports(priorityLevel);
-  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
+  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 });
   const computeUnitPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports });
 
   // Calculate active bin from initial price

@@ -495,6 +495,10 @@ export async function buildPoolCreationWithLiquidityTransactions(
   params: PoolCreationWithLiquidityParams,
   connection: Connection
 ): Promise<PoolCreationResult> {
+  console.log(`[POOL_CREATION] ==================== START ====================`);
+  console.log(`[POOL_CREATION] Building pool creation with liquidity`);
+  console.log(`[POOL_CREATION] Connection provided: ${!!connection}`);
+
   const {
     admin,
     baseMint,
@@ -760,6 +764,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
     });
   }
 
+  console.log(`[POOL_CREATION] About to fetch existing position bins for position: ${positionPda.toBase58()}`);
   let existingPositionBins: Array<{ pubkey: PublicKey; account: { data: Buffer } }> = [];
   try {
     // Fetch all existing position bins for this position
@@ -774,10 +779,12 @@ export async function buildPoolCreationWithLiquidityTransactions(
       },
     };
 
+    console.log(`[POOL_CREATION] Calling connection.getProgramAccounts with filter...`);
     const accounts = await connection.getProgramAccounts(PROGRAM_ID, {
       commitment: "confirmed",
       filters: [positionFilter],
     });
+    console.log(`[POOL_CREATION] getProgramAccounts returned ${accounts.length} accounts`);
 
     existingPositionBins = accounts.map(acc => ({
       pubkey: acc.pubkey,

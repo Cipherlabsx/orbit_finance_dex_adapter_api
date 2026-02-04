@@ -521,7 +521,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
       new TransactionInstruction({
         programId: PROGRAM_ID,
         keys: [
-          { pubkey: poolPda, isSigner: false, isWritable: false },
+          { pubkey: poolPda, isSigner: false, isWritable: true },
           { pubkey: adminPk, isSigner: true, isWritable: true },
           { pubkey: binArrayPda, isSigner: false, isWritable: true },
           { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -543,7 +543,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
     new TransactionInstruction({
       programId: PROGRAM_ID,
       keys: [
-        { pubkey: poolPda, isSigner: false, isWritable: false },
+        { pubkey: poolPda, isSigner: false, isWritable: true },
         { pubkey: adminPk, isSigner: true, isWritable: true },
         { pubkey: positionPda, isSigner: false, isWritable: true },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },

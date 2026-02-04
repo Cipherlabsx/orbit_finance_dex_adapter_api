@@ -15,7 +15,6 @@ import {
   PublicKey,
   TransactionInstruction,
   SystemProgram,
-  SYSVAR_RENT_PUBKEY,
   ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
@@ -400,6 +399,7 @@ export async function buildPoolCreationTransactions(
   const [creatorFeeVaultPda] = deriveVaultPda(poolPda, "creator_fee");
   const [holdersFeeVaultPda] = deriveVaultPda(poolPda, "holders_fee");
   const [nftFeeVaultPda] = deriveVaultPda(poolPda, "nft_fee");
+  const [protocolFeeVaultPda] = deriveVaultPda(poolPda, "protocol_fee");
 
   const initVaultsData = coder.instruction.encode("init_pool_vaults", {});
 
@@ -415,9 +415,9 @@ export async function buildPoolCreationTransactions(
       { pubkey: creatorFeeVaultPda, isSigner: false, isWritable: true },
       { pubkey: holdersFeeVaultPda, isSigner: false, isWritable: true },
       { pubkey: nftFeeVaultPda, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: protocolFeeVaultPda, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: initVaultsData,
   });

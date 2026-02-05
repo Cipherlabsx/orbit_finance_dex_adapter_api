@@ -805,7 +805,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const positionBinInfos = await connection.getMultipleAccountsInfo(positionBinPdas, "confirmed");
 
   // Filter to only position bins that DON'T exist yet
-  const binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
+  let binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
 
   // CRITICAL FIX: Check if position exists (not just current batch bins)
   // If position exists, previous add_liquidity txs succeeded and we need to fetch ALL existing bins
@@ -825,7 +825,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
         {
           commitment: "confirmed",
           filters: [
-            { dataSize: 88 }, // PositionBin account size
+            { dataSize: 144 }, // PositionBin account size (corrected from 88)
             { memcmp: { offset: 8, bytes: positionPda.toBase58() } }, // Position field at offset 8
           ],
         }
@@ -837,7 +837,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
       for (const { account } of existingPositionBins) {
         // PositionBin structure: discriminator(8) + position(32) + bin_index(8) + ...
         // CRITICAL: bin_index is stored as u64 (8 bytes), not i32 (4 bytes)
-        const binIndexU64 = account.data.readBigUInt64LE(40); // bin_index at offset 40 (8 + 32)
+        const binIndexU64 = account.data.readBigUInt64LE(72); // bin_index at offset 72 (8 + 32 + 32)
 
         // Convert from unsigned u64 to signed i32 (bin_index is logically i32)
         const binIndexI32 = binIndexU64 < 0x80000000n
@@ -854,6 +854,87 @@ export async function buildPoolCreationWithLiquidityTransactions(
     } catch (error) {
       console.error(`[POOL_CREATION] Error fetching existing bins:`, error);
       // Continue anyway - worst case is we get accounting error and user retries
+    }
+  }
+
+  // AUTO-REPAIR: Detect orphaned BinArray liquidity (BinArrays with tokens but no PositionBins)
+  // This happens when init_position_bins fails but add_liquidity succeeds in a previous attempt
+  if (positionExists && allExistingBinIndices.length === 0) {
+    console.log("[POOL_CREATION] Position exists but has NO PositionBins. Scanning BinArrays for orphaned liquidity...");
+
+    try {
+      const binArrayAccounts = await connection.getProgramAccounts(
+        PROGRAM_ID,
+        {
+          commitment: "confirmed",
+          filters: [
+            { dataSize: 5176 }, // BinArray account size
+            { memcmp: { offset: 8, bytes: poolPda.toBase58() } }, // pool field at offset 8
+          ],
+        }
+      );
+
+      console.log(`[POOL_CREATION] Found ${binArrayAccounts.length} BinArray accounts`);
+
+      const orphanedBins: number[] = [];
+
+      for (const { pubkey, account } of binArrayAccounts) {
+        const lowerBinIndex = account.data.readInt32LE(5160); // lower_bin_index at offset 5160
+
+        // Check all 64 bins in this BinArray
+        for (let i = 0; i < 64; i++) {
+          const offset = 40 + i * 80; // bins start at offset 40, each CompactBin is 80 bytes
+
+          // CompactBin: reserve_base(16) + reserve_quote(16) + total_shares(16) + ...
+          // Read lower 8 bytes of u128 reserve_base and reserve_quote
+          const reserveBase = account.data.readBigUInt64LE(offset);
+          const reserveQuote = account.data.readBigUInt64LE(offset + 16);
+
+          if (reserveBase > 0n || reserveQuote > 0n) {
+            const binIndex = lowerBinIndex + i;
+            orphanedBins.push(binIndex);
+            console.log(`[POOL_CREATION] 🚨 Orphaned liquidity detected: Bin ${binIndex} (BinArray ${pubkey.toBase58().slice(0, 8)}...) has ${reserveBase} base, ${reserveQuote} quote`);
+          }
+        }
+      }
+
+      if (orphanedBins.length > 0) {
+        console.warn(`[POOL_CREATION] ⚠️  CRITICAL: Found ${orphanedBins.length} bins with orphaned liquidity!`);
+        console.warn(`[POOL_CREATION] This pool is in a BROKEN STATE (BinArrays have liquidity but no PositionBins)`);
+        console.warn(`[POOL_CREATION] Adding orphaned bins to existing bins list for auto-repair...`);
+
+        // Add orphaned bins to allExistingBinIndices so they get included in reference deposits
+        // But filter out bins that are in the current deposits (to avoid duplicates)
+        const newBinIndices = depositsRaw.map(d => d.bin_index);
+        for (const binIndex of orphanedBins) {
+          if (!newBinIndices.includes(binIndex)) {
+            allExistingBinIndices.push(binIndex);
+          }
+        }
+
+        console.log(`[POOL_CREATION] Updated existing bins list: ${allExistingBinIndices.length} bins total`);
+
+        // CRITICAL: Also add orphaned bins to binIndicesToCreate so PositionBins get created
+        // This auto-repairs the broken state by creating missing PositionBins
+        console.log(`[POOL_CREATION] 🔧 AUTO-REPAIR: Adding ${orphanedBins.length} orphaned bins to PositionBin creation queue...`);
+
+        for (const binIndex of orphanedBins) {
+          // Only add if not already in the list
+          if (!binIndicesToCreate.includes(binIndex)) {
+            binIndicesToCreate.push(binIndex);
+          }
+        }
+
+        // Sort for consistent ordering
+        binIndicesToCreate.sort((a, b) => a - b);
+
+        console.log(`[POOL_CREATION] 🔧 AUTO-REPAIR: Will create ${binIndicesToCreate.length} total PositionBins (${orphanedBins.length} for orphaned liquidity)`);
+      } else {
+        console.log("[POOL_CREATION] No orphaned liquidity found. Pool is clean.");
+      }
+    } catch (error) {
+      console.error(`[POOL_CREATION] Error scanning BinArrays for orphaned liquidity:`, error);
+      // Continue anyway - if this fails, we'll get accounting error and user can run repair script
     }
   }
 

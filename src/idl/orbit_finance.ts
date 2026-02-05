@@ -463,7 +463,8 @@ export type OrbitFinance = {
         {
           "name": "pool",
           "docs": [
-            "Pool PDA (seeded from instruction args)"
+            "Pool PDA (seeded from instruction args)",
+            "CRITICAL: Pool address includes bin_step_bps to support multiple pools per token pair"
           ],
           "writable": true,
           "pda": {
@@ -484,6 +485,10 @@ export type OrbitFinance = {
               {
                 "kind": "arg",
                 "path": "quoteMint"
+              },
+              {
+                "kind": "arg",
+                "path": "binStepBps"
               }
             ]
           }
@@ -491,7 +496,7 @@ export type OrbitFinance = {
         {
           "name": "registry",
           "docs": [
-            "Registry PDA (close too so you can re-init same pair)"
+            "Registry PDA (close too so you can re-init same pool with same bin step)"
           ],
           "writable": true,
           "pda": {
@@ -516,6 +521,10 @@ export type OrbitFinance = {
               {
                 "kind": "arg",
                 "path": "quoteMint"
+              },
+              {
+                "kind": "arg",
+                "path": "binStepBps"
               }
             ]
           }
@@ -561,6 +570,10 @@ export type OrbitFinance = {
         {
           "name": "quoteMint",
           "type": "pubkey"
+        },
+        {
+          "name": "binStepBps",
+          "type": "u16"
         }
       ]
     },
@@ -808,7 +821,9 @@ export type OrbitFinance = {
     {
       "name": "initPool",
       "docs": [
-        "Initializes a new liquidity pool (state + lp_mint + registry)."
+        "Initializes a new liquidity pool (state + lp_mint + registry + vaults).",
+        "OPTIMIZATION: Merged init_pool + init_pool_vaults into single instruction (saves 1 tx).",
+        "Creates pool account, LP mint, registry, and all 6 token vaults in one transaction."
       ],
       "discriminator": [
         116,
@@ -833,15 +848,24 @@ export type OrbitFinance = {
           "name": "creator"
         },
         {
-          "name": "baseMintAccount"
+          "name": "baseMintAccount",
+          "docs": [
+            "Base mint (validated by token::mint constraint on vaults)"
+          ]
         },
         {
-          "name": "quoteMintAccount"
+          "name": "quoteMintAccount",
+          "docs": [
+            "Quote mint (validated by token::mint constraint on vaults)"
+          ]
         },
         {
           "name": "pool",
           "docs": [
-            "Pool state account (PDA), zero_copy for stack efficiency."
+            "Pool state account (PDA), zero_copy for stack efficiency.",
+            "CRITICAL: Pool address includes bin_step_bps to allow multiple pools per token pair.",
+            "Each bin step represents a different price granularity, enabling traders to choose",
+            "between tighter spreads (lower bin steps) or wider ranges (higher bin steps)."
           ],
           "writable": true,
           "pda": {
@@ -862,19 +886,258 @@ export type OrbitFinance = {
               {
                 "kind": "arg",
                 "path": "quoteMint"
+              },
+              {
+                "kind": "arg",
+                "path": "binStepBps"
               }
             ]
           }
         },
         {
           "name": "lpMint",
+          "docs": [
+            "LP mint (fungible shares)"
+          ],
           "writable": true,
           "signer": true
         },
         {
+          "name": "baseVault",
+          "docs": [
+            "Base vault - stores base token liquidity (Box to save stack space)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  115,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "quoteVault",
+          "docs": [
+            "Quote vault - stores quote token liquidity (Box to save stack space)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  113,
+                  117,
+                  111,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "creatorFeeVault",
+          "docs": [
+            "Creator fee vault - stores creator's share of swap fees (Box to save stack space)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  114,
+                  101,
+                  97,
+                  116,
+                  111,
+                  114,
+                  95,
+                  102,
+                  101,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "holdersFeeVault",
+          "docs": [
+            "Holders fee vault - stores LP holders' share of swap fees (Box to save stack space)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  108,
+                  100,
+                  101,
+                  114,
+                  115,
+                  95,
+                  102,
+                  101,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "nftFeeVault",
+          "docs": [
+            "NFT fee vault - stores NFT holders' share of swap fees (Box to save stack space)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  110,
+                  102,
+                  116,
+                  95,
+                  102,
+                  101,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "protocolFeeVault",
+          "docs": [
+            "Protocol fee vault - stores protocol's share (12.5% of swap fees) (Box to save stack space)",
+            "Can be permissionlessly swept to Squads multisig via transfer_protocol_fees instruction"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  95,
+                  102,
+                  101,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "registry",
           "docs": [
-            "Pair registry PDA to prevent duplicate pools."
+            "Pair registry PDA to prevent duplicate pools.",
+            "CRITICAL: Includes bin_step_bps to allow multiple pools per token pair (one registry per pool)"
           ],
           "writable": true,
           "pda": {
@@ -899,6 +1162,10 @@ export type OrbitFinance = {
               {
                 "kind": "arg",
                 "path": "quoteMint"
+              },
+              {
+                "kind": "arg",
+                "path": "binStepBps"
               }
             ]
           }
@@ -942,276 +1209,6 @@ export type OrbitFinance = {
           "type": "u8"
         }
       ]
-    },
-    {
-      "name": "initPoolVaults",
-      "docs": [
-        "Initializes the pool’s vault token accounts and writes them into Pool."
-      ],
-      "discriminator": [
-        209,
-        118,
-        61,
-        154,
-        158,
-        189,
-        162,
-        244
-      ],
-      "accounts": [
-        {
-          "name": "admin",
-          "docs": [
-            "Payer for account creations"
-          ],
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "pool",
-          "docs": [
-            "Pool PDA (already initialized by `init_pool`)"
-          ],
-          "writable": true
-        },
-        {
-          "name": "baseMint",
-          "docs": [
-            "Base mint (not deserialized to save stack space, validated by token::mint constraint)"
-          ]
-        },
-        {
-          "name": "quoteMint",
-          "docs": [
-            "Quote mint (not deserialized to save stack space, validated by token::mint constraint)"
-          ]
-        },
-        {
-          "name": "baseVault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "const",
-                "value": [
-                  98,
-                  97,
-                  115,
-                  101
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "quoteVault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "const",
-                "value": [
-                  113,
-                  117,
-                  111,
-                  116,
-                  101
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "creatorFeeVault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  114,
-                  101,
-                  97,
-                  116,
-                  111,
-                  114,
-                  95,
-                  102,
-                  101,
-                  101
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "holdersFeeVault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "const",
-                "value": [
-                  104,
-                  111,
-                  108,
-                  100,
-                  101,
-                  114,
-                  115,
-                  95,
-                  102,
-                  101,
-                  101
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "nftFeeVault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "const",
-                "value": [
-                  110,
-                  102,
-                  116,
-                  95,
-                  102,
-                  101,
-                  101
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "protocolFeeVault",
-          "docs": [
-            "Protocol fee vault (12.5% of total swap fees, token::authority = pool)",
-            "Can be permissionlessly swept to Squads multisig via transfer_protocol_fees instruction"
-          ],
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  114,
-                  111,
-                  116,
-                  111,
-                  99,
-                  111,
-                  108,
-                  95,
-                  102,
-                  101,
-                  101
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "tokenProgram",
-          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        },
-        {
-          "name": "systemProgram",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": []
     },
     {
       "name": "initPosition",
@@ -4154,7 +4151,8 @@ export type OrbitFinance = {
       "name": "pairRegistry",
       "docs": [
         "Pair registry to prevent duplicate pools beyond canonical ordering.",
-        "PDA seeds: [b\"registry\", base_mint, quote_mint] (where base_mint < quote_mint)"
+        "PDA seeds: [b\"registry\", base_mint, quote_mint, bin_step_bps] (where base_mint < quote_mint)",
+        "Each pool (unique base_mint + quote_mint + bin_step_bps combination) has its own registry."
       ],
       "type": {
         "kind": "struct",

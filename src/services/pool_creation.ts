@@ -56,7 +56,7 @@ export type PoolCreationParams = {
   baseMint: string;              // Base token mint
   quoteMint: string;             // Quote token mint
   lpMintPublicKey: string;       // SECURITY: Client-generated LP mint public key (frontend generates and signs)
-  binStepBps: number;            // Bin step in basis points (1, 5, 10, 25, 50, 100)
+  binStepBps: number;            // Bin step in basis points (22 Meteora-standard values: 1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400)
   initialPrice: number;          // Initial price as decimal (e.g., 6.35 for CIPHER/USDC)
   baseDecimals: number;          // Base token decimals
   quoteDecimals: number;         // Quote token decimals
@@ -108,7 +108,7 @@ export type SerializedInstruction = {
 /**
  * Allowed bin step values (in basis points)
  */
-const ALLOWED_BIN_STEPS = [1, 5, 10, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500];
+const ALLOWED_BIN_STEPS = [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400];
 
 /**
  * Validates that mints are in canonical order (base < quote lexicographically)

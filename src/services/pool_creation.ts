@@ -718,10 +718,12 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Filter to only position bins that DON'T exist yet
   const binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
 
-  // CRITICAL FIX: Detect if ANY position bins already exist (indicates this is a resume/add more liquidity scenario)
-  const hasExistingBins = positionBinInfos.some(info => info !== null);
+  // CRITICAL FIX: Check if position exists (not just current batch bins)
+  // If position exists, previous add_liquidity txs succeeded and we need to fetch ALL existing bins
+  // to include them in reconciliation via reference deposits
+  const hasExistingBins = positionExists;
 
-  // ROBUST FIX: If existing liquidity detected, use getProgramAccounts to find ALL existing position bins
+  // ROBUST FIX: If position exists, use getProgramAccounts to find ALL existing position bins
   // This ensures we don't miss ANY liquidity regardless of distance from current deposits
   let allExistingBinIndices: number[] = [];
 

@@ -746,15 +746,24 @@ export async function buildPoolCreationWithLiquidityTransactions(
       const newBinIndices = depositsRaw.map(d => d.bin_index);
 
       for (const { account } of existingPositionBins) {
-        // PositionBin structure: discriminator(8) + position(32) + bin_index(4) + ...
-        const binIndexI32 = account.data.readInt32LE(40); // bin_index at offset 40 (8 + 32)
+        // PositionBin structure: discriminator(8) + position(32) + bin_index(8) + ...
+        // CRITICAL: bin_index is stored as u64 (8 bytes), not i32 (4 bytes)
+        const binIndexU64 = account.data.readBigUInt64LE(40); // bin_index at offset 40 (8 + 32)
+
+        // Convert from unsigned u64 to signed i32 (bin_index is logically i32)
+        const binIndexI32 = binIndexU64 < 0x80000000n
+          ? Number(binIndexU64)
+          : Number(binIndexU64) - 0x100000000;
 
         // Only include bins NOT in the new deposits (to avoid duplicates)
         if (!newBinIndices.includes(binIndexI32)) {
           allExistingBinIndices.push(binIndexI32);
         }
       }
+
+      console.log(`[POOL_CREATION] Found ${allExistingBinIndices.length} existing bins NOT in current deposits: [${allExistingBinIndices.join(", ")}]`);
     } catch (error) {
+      console.error(`[POOL_CREATION] Error fetching existing bins:`, error);
       // Continue anyway - worst case is we get accounting error and user retries
     }
   }
@@ -855,11 +864,16 @@ export async function buildPoolCreationWithLiquidityTransactions(
         base_in: 1n, // 1 lamport minimum (satisfies > 0 requirement)
         quote_in: 0n,
       });
+
+      console.log(`[POOL_CREATION] Adding 1-lamport reference deposit for BinArray ${lowerBinIndex} (bin ${representativeBin})`);
     }
   }
 
   // Combine reference deposits + new deposits
   const allDeposits = [...referenceDeposits, ...depositsRaw];
+
+  console.log(`[POOL_CREATION] Total deposits: ${allDeposits.length} (${referenceDeposits.length} reference + ${depositsRaw.length} new)`);
+  console.log(`[POOL_CREATION] New deposits cover ${newBinArrays.size} BinArrays: [${Array.from(newBinArrays).sort((a, b) => a - b).join(", ")}]`);
 
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
   // Solana tx limit: 1232 bytes serialized

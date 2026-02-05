@@ -189,8 +189,35 @@ export function startProgramLogStream(params: {
   const programIdStr = programId.toBase58();
   const seenTx = new Set<string>();
 
-  const subIdPromise = (connection as any)._rpcWebSocket
-    .call("logsSubscribe", [{ mentions: [programIdStr] }])
+  // Wait for WebSocket to be ready before subscribing
+  const ensureWebSocketReady = async (): Promise<void> => {
+    const ws = (connection as any)._rpcWebSocket;
+    if (!ws) throw new Error("WebSocket not initialized");
+
+    const readyState = ws._rpcWebSocketGeneration || ws.readyState;
+    if (readyState === 1) return; // OPEN
+
+    // Wait up to 5 seconds for connection
+    const maxWait = 5000;
+    const startTime = Date.now();
+
+    return new Promise((resolve, reject) => {
+      const checkReady = () => {
+        const state = ws._rpcWebSocketGeneration || ws.readyState;
+        if (state === 1) {
+          resolve();
+        } else if (Date.now() - startTime > maxWait) {
+          reject(new Error("WebSocket connection timeout"));
+        } else {
+          setTimeout(checkReady, 100);
+        }
+      };
+      checkReady();
+    });
+  };
+
+  const subIdPromise = ensureWebSocketReady()
+    .then(() => (connection as any)._rpcWebSocket.call("logsSubscribe", [{ mentions: [programIdStr] }]))
     .then((subId: number) => {
       (connection as any)._rpcWebSocket.on("logsNotification", async (args: any) => {
         if (args.subscription !== subId) return;
@@ -364,12 +391,23 @@ export function startProgramLogStream(params: {
       });
 
       return subId;
+    })
+    .catch((error) => {
+      console.error("[program_ws] Failed to start log stream:", error.message);
+      // Return null on error so server doesn't crash
+      return null;
     });
 
   return {
     async stop() {
-      const subId = await subIdPromise;
-      await (connection as any)._rpcWebSocket.call("logsUnsubscribe", [subId]);
+      try {
+        const subId = await subIdPromise;
+        if (subId !== null) {
+          await (connection as any)._rpcWebSocket.call("logsUnsubscribe", [subId]);
+        }
+      } catch (error: any) {
+        console.error("[program_ws] Error during stop:", error.message);
+      }
     },
   };
 }

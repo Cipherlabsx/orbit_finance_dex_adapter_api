@@ -886,7 +886,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Calculation: ~300 bytes overhead + 100 bytes compute budget + (34 bytes × deposits)
   // With compute budget: 400 + (34 × deposits) must be < 1232
   // Max safe: (1232 - 400) / 34 = ~24, but using 4 for extra safety margin
-  // Reduced from 8 to 4 to avoid transaction size limit (1232 bytes raw, 1644 encoded)
   const BATCH_SIZE = 4;
   const addLiquidityTransactions: Array<{ type: "add_liquidity"; instructions: SerializedInstruction[] }> = [];
 

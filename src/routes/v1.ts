@@ -346,8 +346,8 @@ export async function v1Routes(app: FastifyInstance) {
       baseMint: publicKeyValidator,
       quoteMint: publicKeyValidator,
       lpMintPublicKey: publicKeyValidator, // SECURITY: Client-generated, only public key
-      binStepBps: z.number().int().refine((v) => [1, 5, 10, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500].includes(v), {
-        message: "binStepBps must be one of: 1, 5, 10, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500",
+      binStepBps: z.number().int().refine((v) => [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400].includes(v), {
+        message: "binStepBps must be one of: 1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400",
       }),
       initialPrice: z.number().positive(),
       feeConfig: z.object({

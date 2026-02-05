@@ -532,21 +532,48 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const computeUnitPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports });
 
   // Calculate active bin from initial price
+  // DLMM specification constants
+  const BIN_ARRAY_SIZE = 64; // Each BinArray holds exactly 64 bins
+
   const priceQ64_64 = calculatePriceQ64_64(initialPrice, baseDecimals, quoteDecimals);
   const activeBin = priceToActiveBin(priceQ64_64, binStepBps);
 
   // Calculate bin range based on strategy
+  // NOTE: This creates (binsLeft + 1 + binsRight) total bins, including active bin
   const lowerBinIndex = activeBin - binsLeft;
   const upperBinIndex = activeBin + binsRight;
+
+  // Validate bin range is within i32 bounds
+  if (lowerBinIndex < -2147483648 || upperBinIndex > 2147483647) {
+    throw new Error(
+      `Bin range [${lowerBinIndex}, ${upperBinIndex}] exceeds i32 bounds (-2147483648 to 2147483647). ` +
+      `activeBin=${activeBin}, binsLeft=${binsLeft}, binsRight=${binsRight}. ` +
+      `Reduce binsLeft or binsRight to fit within valid range.`
+    );
+  }
+
+  // Validate bin range is reasonable (not too large)
+  const totalBinsRequested = upperBinIndex - lowerBinIndex + 1;
+  const MAX_BINS_PER_POOL = 1000; // Reasonable limit to prevent gas issues
+  if (totalBinsRequested > MAX_BINS_PER_POOL) {
+    throw new Error(
+      `Bin range too large: ${totalBinsRequested} bins requested. ` +
+      `Maximum allowed: ${MAX_BINS_PER_POOL}. ` +
+      `Reduce binsLeft (${binsLeft}) or binsRight (${binsRight}).`
+    );
+  }
+
+  console.log(`[POOL_CREATION] Bin range: ${lowerBinIndex} to ${upperBinIndex} (${totalBinsRequested} bins)`);
+  console.log(`[POOL_CREATION] Active bin: ${activeBin} (price: ${initialPrice})`);
 
   // Determine which bin arrays we need to create
   const binArraysNeeded = new Set<number>();
   for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
-    const arrayIndex = Math.floor(binIndex / 64); // Each bin array holds 64 bins (BIN_ARRAY_SIZE)
-    binArraysNeeded.add(arrayIndex * 64); // Lower bin index of the array
+    const arrayIndex = Math.floor(binIndex / BIN_ARRAY_SIZE);
+    binArraysNeeded.add(arrayIndex * BIN_ARRAY_SIZE); // Store lower bin index of the array
   }
 
-  // OPTIMIZATION Phase 2: Check which bin arrays already exist on-chain (skip creating existing ones)
+  // Check which bin arrays already exist on-chain (skip creating existing ones)
   const binArrayIndices = Array.from(binArraysNeeded).sort((a, b) => a - b);
   const binArrayPdas = binArrayIndices.map(lowerBinIdx => deriveBinArrayPda(poolPda, lowerBinIdx)[0]);
   const binArrayInfos = await connection.getMultipleAccountsInfo(binArrayPdas, "confirmed");
@@ -653,36 +680,98 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const depositsRaw: Array<{ bin_index: number; base_in: bigint; quote_in: bigint }> = [];
   const totalBins = upperBinIndex - lowerBinIndex + 1;
 
-  // Simple uniform distribution strategy
-  for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
-    const baseShare = baseAmountRaw / BigInt(totalBins);
-    const quoteShare = quoteAmountRaw / BigInt(totalBins);
+  // CRITICAL FIX: Count bins that actually use each token
+  // In DLMM: bins <= activeBin get base, bins >= activeBin get quote, activeBin gets both
+  const binsWithBase = activeBin - lowerBinIndex + 1;   // Bins at or below active (inclusive)
+  const binsWithQuote = upperBinIndex - activeBin + 1;  // Bins at or above active (inclusive)
 
-    // Distribute liquidity based on bin position relative to active bin
-    // - Bins below active: only base tokens
-    // - Bins above active: only quote tokens
-    // - Active bin: both tokens
-    if (binIndex < activeBin) {
-      // Below active: only base
-      if (baseShare > 0n) {
-        depositsRaw.push({ bin_index: binIndex, base_in: baseShare, quote_in: 0n });
+  // Validate amounts are sufficient for distribution
+  if (baseAmountRaw > 0n && baseAmountRaw < BigInt(binsWithBase)) {
+    throw new Error(
+      `Base amount (${baseAmountRaw} atoms) too small for ${binsWithBase} bins. ` +
+      `Minimum required: ${binsWithBase} atoms (1 per bin).`
+    );
+  }
+  if (quoteAmountRaw > 0n && quoteAmountRaw < BigInt(binsWithQuote)) {
+    throw new Error(
+      `Quote amount (${quoteAmountRaw} atoms) too small for ${binsWithQuote} bins. ` +
+      `Minimum required: ${binsWithQuote} atoms (1 per bin).`
+    );
+  }
+
+  // Calculate per-bin shares and remainders (to avoid truncation loss)
+  const baseShare = binsWithBase > 0 ? baseAmountRaw / BigInt(binsWithBase) : 0n;
+  const quoteShare = binsWithQuote > 0 ? quoteAmountRaw / BigInt(binsWithQuote) : 0n;
+  const baseRemainder = binsWithBase > 0 ? baseAmountRaw % BigInt(binsWithBase) : 0n;
+  const quoteRemainder = binsWithQuote > 0 ? quoteAmountRaw % BigInt(binsWithQuote) : 0n;
+
+  console.log(`[POOL_CREATION] Liquidity distribution:`);
+  console.log(`  Total bins: ${totalBins} (${lowerBinIndex} to ${upperBinIndex})`);
+  console.log(`  Active bin: ${activeBin}`);
+  console.log(`  Bins with base: ${binsWithBase} (≤ active)`);
+  console.log(`  Bins with quote: ${binsWithQuote} (≥ active)`);
+  console.log(`  Base: ${baseAmountRaw} atoms = ${baseShare}/bin + ${baseRemainder} remainder`);
+  console.log(`  Quote: ${quoteAmountRaw} atoms = ${quoteShare}/bin + ${quoteRemainder} remainder`);
+
+  // Distribute liquidity with remainder distribution to avoid truncation loss
+  let baseCounter = 0;  // Counter for bins receiving base tokens
+  let quoteCounter = 0; // Counter for bins receiving quote tokens
+
+  for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
+    let binBaseAmount = 0n;
+    let binQuoteAmount = 0n;
+
+    // Distribute base tokens to bins <= activeBin
+    if (binIndex <= activeBin && baseShare > 0n) {
+      binBaseAmount = baseShare;
+      // Distribute remainder: first N bins get +1 atom each (N = remainder)
+      if (baseCounter < Number(baseRemainder)) {
+        binBaseAmount += 1n;
       }
-    } else if (binIndex > activeBin) {
-      // Above active: only quote
-      if (quoteShare > 0n) {
-        depositsRaw.push({ bin_index: binIndex, base_in: 0n, quote_in: quoteShare });
+      baseCounter++;
+    }
+
+    // Distribute quote tokens to bins >= activeBin
+    if (binIndex >= activeBin && quoteShare > 0n) {
+      binQuoteAmount = quoteShare;
+      // Distribute remainder: first N bins get +1 atom each (N = remainder)
+      if (quoteCounter < Number(quoteRemainder)) {
+        binQuoteAmount += 1n;
       }
-    } else {
-      // Active bin: both tokens
-      if (baseShare > 0n || quoteShare > 0n) {
-        depositsRaw.push({
-          bin_index: binIndex,
-          base_in: baseShare > 0n ? baseShare : 0n,
-          quote_in: quoteShare > 0n ? quoteShare : 0n
-        });
-      }
+      quoteCounter++;
+    }
+
+    // Only create deposit if at least one amount is non-zero
+    if (binBaseAmount > 0n || binQuoteAmount > 0n) {
+      depositsRaw.push({
+        bin_index: binIndex,
+        base_in: binBaseAmount,
+        quote_in: binQuoteAmount
+      });
     }
   }
+
+  // Verify: total distributed should equal input amounts (no truncation loss)
+  const totalBaseDistributed = depositsRaw.reduce((sum, d) => sum + d.base_in, 0n);
+  const totalQuoteDistributed = depositsRaw.reduce((sum, d) => sum + d.quote_in, 0n);
+
+  if (totalBaseDistributed !== baseAmountRaw) {
+    throw new Error(
+      `CRITICAL: Base amount mismatch! Input: ${baseAmountRaw}, Distributed: ${totalBaseDistributed}, ` +
+      `Lost: ${baseAmountRaw - totalBaseDistributed}`
+    );
+  }
+  if (totalQuoteDistributed !== quoteAmountRaw) {
+    throw new Error(
+      `CRITICAL: Quote amount mismatch! Input: ${quoteAmountRaw}, Distributed: ${totalQuoteDistributed}, ` +
+      `Lost: ${quoteAmountRaw - totalQuoteDistributed}`
+    );
+  }
+
+  console.log(`[POOL_CREATION] ✓ Distribution verified: ${depositsRaw.length} deposits created`);
+  console.log(`  Total base distributed: ${totalBaseDistributed} atoms (100%)`);
+  console.log(`  Total quote distributed: ${totalQuoteDistributed} atoms (100%)`);
+
 
   // Derive owner's token accounts (ATAs)
   // NOTE: Frontend is responsible for ensuring ATAs exist before calling add_liquidity
@@ -1037,11 +1126,83 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
 /**
  * Convert Q64.64 price to active bin index
+ *
+ * CRITICAL: Uses high-precision arithmetic to avoid bin selection errors
+ * Formula: activeBin = floor(log(price) / log(1 + binStep/10000))
+ *
+ * @param priceQ64_64 - Price in Q64.64 fixed-point format (price * 2^64)
+ * @param binStepBps - Bin step in basis points (e.g., 1 = 0.01%, 100 = 1%)
+ * @returns Active bin index (signed i32)
  */
 function priceToActiveBin(priceQ64_64: bigint, binStepBps: number): number {
-  // Active bin = floor(log(price) / log(1 + binStep/10000))
-  // Simplified approximation for now
-  const priceFloat = Number(priceQ64_64) / Number(1n << 64n);
+  // Validate inputs
+  if (priceQ64_64 <= 0n) {
+    throw new Error(`Invalid price: ${priceQ64_64} (must be > 0)`);
+  }
+  if (binStepBps <= 0 || binStepBps > 10000) {
+    throw new Error(`Invalid binStepBps: ${binStepBps} (must be 1-10000)`);
+  }
+
+  // Convert Q64.64 to float carefully
+  // For prices > 2^53, we need to scale down first to avoid overflow
+  const Q64 = 1n << 64n;
+
+  // Check if priceQ64_64 will overflow Number (> 2^53)
+  const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+  let priceFloat: number;
+
+  if (priceQ64_64 > MAX_SAFE_BIGINT) {
+    // Scale down: divide both numerator and denominator by same factor
+    // priceFloat = (priceQ64_64 / 2^32) / (2^64 / 2^32) = priceQ64_64 / 2^32 / 2^32
+    const scale = 1n << 32n;
+    priceFloat = Number(priceQ64_64 / scale) / Number(Q64 / scale);
+  } else {
+    // Safe to convert directly
+    priceFloat = Number(priceQ64_64) / Number(Q64);
+  }
+
+  // Validate converted price
+  if (!Number.isFinite(priceFloat) || priceFloat <= 0) {
+    throw new Error(`Price conversion resulted in invalid float: ${priceFloat}`);
+  }
+
+  // Calculate bin index with logarithm
   const binStep = binStepBps / 10000;
-  return Math.floor(Math.log(priceFloat) / Math.log(1 + binStep));
+  const logBinStep = Math.log(1 + binStep);
+
+  // bin = floor(log(price) / log(1 + binStep))
+  const binFloat = Math.log(priceFloat) / logBinStep;
+
+  // Validate result is finite
+  if (!Number.isFinite(binFloat)) {
+    throw new Error(
+      `Bin calculation resulted in ${binFloat} for price ${priceFloat} and binStep ${binStep}`
+    );
+  }
+
+  const activeBin = Math.floor(binFloat);
+
+  // Validate bin is within i32 range (-2^31 to 2^31-1)
+  if (activeBin < -2147483648 || activeBin > 2147483647) {
+    throw new Error(
+      `Calculated bin ${activeBin} exceeds i32 range. ` +
+      `Price ${priceFloat} with binStep ${binStepBps}bps produces invalid bin.`
+    );
+  }
+
+  // Verify calculation by checking adjacent bins (catch floating-point errors)
+  // The active bin should satisfy: (1+binStep)^bin <= price < (1+binStep)^(bin+1)
+  const binPrice = Math.pow(1 + binStep, activeBin);
+  const nextBinPrice = Math.pow(1 + binStep, activeBin + 1);
+
+  // Adjust if floating-point error caused off-by-one
+  if (binPrice > priceFloat && activeBin > -2147483648) {
+    // Current bin too high, use previous bin
+    return activeBin - 1;
+  } else if (nextBinPrice <= priceFloat && activeBin < 2147483647) {
+    // Current bin too low, use next bin
+    return activeBin + 1;
+  }
+
+  return activeBin;
 }

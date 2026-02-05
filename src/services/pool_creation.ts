@@ -711,59 +711,53 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const existingBinCount = positionBinInfos.filter(info => info !== null).length;
   console.log(`[ACCOUNTING_FIX] Position has existing bins: ${hasExistingBins}, count in sampled range: ${existingBinCount}/${uniqueBinIndices.length}`);
 
-  // ROBUST FIX: If existing liquidity detected, scan WIDER RANGE to find ALL existing BinArrays
-  // This ensures we don't miss liquidity that's far from current deposits
+  // ROBUST FIX: If existing liquidity detected, use getProgramAccounts to find ALL existing position bins
+  // This ensures we don't miss ANY liquidity regardless of distance from current deposits
   let allExistingBinIndices: number[] = [];
 
   if (hasExistingBins) {
-    console.log(`[ACCOUNTING_FIX] Scanning wider range to find all existing position bins...`);
+    console.log(`[ACCOUNTING_FIX] Using getProgramAccounts to find ALL existing position bins...`);
 
-    // Calculate scan range: ±10 BinArrays (±640 bins) from new deposits
-    // This covers most realistic scenarios while staying performant
-    const newBinIndices = depositsRaw.map(d => d.bin_index);
-    const minNewBin = Math.min(...newBinIndices);
-    const maxNewBin = Math.max(...newBinIndices);
-    const SCAN_RANGE_BINS = 640; // 10 BinArrays × 64 bins
-
-    const scanMinBin = minNewBin - SCAN_RANGE_BINS;
-    const scanMaxBin = maxNewBin + SCAN_RANGE_BINS;
-
-    // Generate all possible bin indices in scan range (sample every 8 bins for performance)
-    const binsToCheck: number[] = [];
-    for (let bin = scanMinBin; bin <= scanMaxBin; bin += 8) {
-      binsToCheck.push(bin);
-    }
-
-    console.log(`[ACCOUNTING_FIX] Checking ${binsToCheck.length} bins in range [${scanMinBin}, ${scanMaxBin}]`);
-
-    // Derive PDAs for all bins in scan range
-    const scanPdas = binsToCheck.map(binIndex => {
-      const binIndexBuffer = Buffer.alloc(8);
-      binIndexBuffer.writeBigUInt64LE(BigInt(binIndex));
-      return PublicKey.findProgramAddressSync(
-        [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
-        PROGRAM_ID
-      )[0];
-    });
-
-    // Fetch in batches of 100 to avoid RPC limits
-    const BATCH_SIZE = 100;
-    for (let i = 0; i < scanPdas.length; i += BATCH_SIZE) {
-      const batch = scanPdas.slice(i, Math.min(i + BATCH_SIZE, scanPdas.length));
-      const batchResults = await connection.getMultipleAccountsInfo(batch, "confirmed");
-
-      // Record which bins exist
-      batchResults.forEach((info, idx) => {
-        if (info !== null) {
-          const binIndex = binsToCheck[i + idx];
-          if (!newBinIndices.includes(binIndex)) {
-            allExistingBinIndices.push(binIndex);
-          }
+    try {
+      // Use getProgramAccounts with memcmp filter to find all position bins for this position
+      // PositionBin account structure: discriminator(8) + position(32) + bin_index(4) + ...
+      const existingPositionBins = await connection.getProgramAccounts(
+        PROGRAM_ID,
+        {
+          commitment: "confirmed",
+          filters: [
+            { dataSize: 88 }, // PositionBin account size
+            { memcmp: { offset: 8, bytes: positionPda.toBase58() } }, // Position field at offset 8
+          ],
         }
-      });
-    }
+      );
 
-    console.log(`[ACCOUNTING_FIX] Found ${allExistingBinIndices.length} existing bins outside new deposit range`);
+      console.log(`[ACCOUNTING_FIX] Found ${existingPositionBins.length} total existing position bins`);
+
+      // Decode bin_index from each position bin account
+      const newBinIndices = depositsRaw.map(d => d.bin_index);
+
+      for (const { account } of existingPositionBins) {
+        // PositionBin structure: discriminator(8) + position(32) + bin_index(4) + ...
+        const binIndexI32 = account.data.readInt32LE(40); // bin_index at offset 40 (8 + 32)
+
+        // Only include bins NOT in the new deposits (to avoid duplicates)
+        if (!newBinIndices.includes(binIndexI32)) {
+          allExistingBinIndices.push(binIndexI32);
+        }
+      }
+
+      console.log(`[ACCOUNTING_FIX] Found ${allExistingBinIndices.length} existing bins outside new deposit range`);
+
+      // Log first few for debugging
+      if (allExistingBinIndices.length > 0) {
+        const sample = allExistingBinIndices.slice(0, 10);
+        console.log(`[ACCOUNTING_FIX] Sample existing bins: [${sample.join(", ")}]${allExistingBinIndices.length > 10 ? "..." : ""}`);
+      }
+    } catch (error) {
+      console.error(`[ACCOUNTING_FIX] Failed to fetch existing position bins:`, error);
+      // Continue anyway - worst case is we get accounting error and user retries
+    }
   }
 
   // Batch init_position_bin instructions to avoid transaction size limit

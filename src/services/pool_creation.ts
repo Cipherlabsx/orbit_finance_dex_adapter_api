@@ -503,6 +503,14 @@ export async function buildPoolCreationWithLiquidityTransactions(
   params: PoolCreationWithLiquidityParams,
   connection: Connection
 ): Promise<PoolCreationResult> {
+  console.log("=".repeat(80));
+  console.log("[POOL_CREATION] *** FUNCTION CALLED ***");
+  console.log(`[POOL_CREATION] Admin: ${params.admin}`);
+  console.log(`[POOL_CREATION] Base: ${params.baseMint}`);
+  console.log(`[POOL_CREATION] Quote: ${params.quoteMint}`);
+  console.log(`[POOL_CREATION] Bin step: ${params.binStepBps} bps`);
+  console.log("=".repeat(80));
+
   const {
     admin,
     baseMint,

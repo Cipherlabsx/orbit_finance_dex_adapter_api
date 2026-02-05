@@ -239,14 +239,19 @@ function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: nu
 
 /**
  * Derives registry PDA (prevents duplicate pools)
- * Seeds: ["registry", baseMint, quoteMint]
+ * Seeds: ["registry", baseMint, quoteMint, binStepBps]
+ * CRITICAL: Each pool (unique base + quote + bin step) has its own registry
  */
-function deriveRegistryPda(baseMint: PublicKey, quoteMint: PublicKey): [PublicKey, number] {
+function deriveRegistryPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number): [PublicKey, number] {
+  const binStepBuf = Buffer.alloc(2);
+  binStepBuf.writeUInt16LE(binStepBps, 0);
+
   return PublicKey.findProgramAddressSync(
     [
       Buffer.from("registry"),
       baseMint.toBuffer(),
       quoteMint.toBuffer(),
+      binStepBuf,
     ],
     PROGRAM_ID
   );
@@ -396,7 +401,8 @@ export async function buildPoolCreationTransactions(
   // Derive PDAs
   // CRITICAL: Pool PDA includes bin_step_bps to enable multiple pools per token pair
   const [poolPda] = derivePoolPda(baseMintPk, quoteMintPk, binStepBps);
-  const [registryPda] = deriveRegistryPda(baseMintPk, quoteMintPk);
+  // CRITICAL: Registry PDA also includes bin_step_bps (one registry per pool)
+  const [registryPda] = deriveRegistryPda(baseMintPk, quoteMintPk, binStepBps);
 
   // SECURITY: Use client-provided LP mint public key (keypair generated on client)
   const lpMintPk = new PublicKey(lpMintPublicKey);
@@ -497,10 +503,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
   params: PoolCreationWithLiquidityParams,
   connection: Connection
 ): Promise<PoolCreationResult> {
-  console.log(`[POOL_CREATION] ==================== START ====================`);
-  console.log(`[POOL_CREATION] Building pool creation with liquidity`);
-  console.log(`[POOL_CREATION] Connection provided: ${!!connection}`);
-
   const {
     admin,
     baseMint,
@@ -551,7 +553,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   // Filter to only bin arrays that DON'T exist yet (saves 1-3 transactions)
   const binArrayIndicesToCreate = binArrayIndices.filter((_, idx) => !binArrayInfos[idx]);
-  console.log(`[OPTIMIZATION] BinArrays: ${binArrayIndicesToCreate.length}/${binArrayIndices.length} need creation, ${binArrayIndices.length - binArrayIndicesToCreate.length} already exist (saved ${binArrayIndices.length - binArrayIndicesToCreate.length} create_bin_array calls)`);
 
   // Build create_bin_array instructions and batch them
   // Each create_bin_array instruction is ~150 bytes
@@ -609,7 +610,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   const positionInfo = await connection.getAccountInfo(positionPda, "confirmed");
   const positionExists = positionInfo !== null;
-  console.log(`[POSITION_CHECK] Position ${positionExists ? "already exists" : "needs creation"} at ${positionPda.toBase58()}`);
 
   // Build init_position instruction only if it doesn't exist
   let initPositionIx: SerializedInstruction | null = null;
@@ -701,7 +701,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Collect unique bin indices and create init_position_bin instructions
   // CRITICAL: Position bins must be initialized before add_liquidity_v2 can use them
   const uniqueBinIndices = Array.from(new Set(depositsRaw.map(d => d.bin_index))).sort((a, b) => a - b);
-  console.log(`[INIT_POSITION_BIN] Need ${uniqueBinIndices.length} position_bin accounts for bins: ${uniqueBinIndices.join(", ")}`);
 
   const POSITION_BIN_SEED = Buffer.from("position_bin");
 
@@ -718,20 +717,15 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   // Filter to only position bins that DON'T exist yet
   const binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
-  console.log(`[POSITION_BINS] ${binIndicesToCreate.length} missing, ${uniqueBinIndices.length - binIndicesToCreate.length} already exist`);
 
   // CRITICAL FIX: Detect if ANY position bins already exist (indicates this is a resume/add more liquidity scenario)
   const hasExistingBins = positionBinInfos.some(info => info !== null);
-  const existingBinCount = positionBinInfos.filter(info => info !== null).length;
-  console.log(`[ACCOUNTING_FIX] Position has existing bins: ${hasExistingBins}, count in sampled range: ${existingBinCount}/${uniqueBinIndices.length}`);
 
   // ROBUST FIX: If existing liquidity detected, use getProgramAccounts to find ALL existing position bins
   // This ensures we don't miss ANY liquidity regardless of distance from current deposits
   let allExistingBinIndices: number[] = [];
 
   if (hasExistingBins) {
-    console.log(`[ACCOUNTING_FIX] Using getProgramAccounts to find ALL existing position bins...`);
-
     try {
       // Use getProgramAccounts with memcmp filter to find all position bins for this position
       // PositionBin account structure: discriminator(8) + position(32) + bin_index(4) + ...
@@ -746,8 +740,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
         }
       );
 
-      console.log(`[ACCOUNTING_FIX] Found ${existingPositionBins.length} total existing position bins`);
-
       // Decode bin_index from each position bin account
       const newBinIndices = depositsRaw.map(d => d.bin_index);
 
@@ -760,16 +752,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
           allExistingBinIndices.push(binIndexI32);
         }
       }
-
-      console.log(`[ACCOUNTING_FIX] Found ${allExistingBinIndices.length} existing bins outside new deposit range`);
-
-      // Log first few for debugging
-      if (allExistingBinIndices.length > 0) {
-        const sample = allExistingBinIndices.slice(0, 10);
-        console.log(`[ACCOUNTING_FIX] Sample existing bins: [${sample.join(", ")}]${allExistingBinIndices.length > 10 ? "..." : ""}`);
-      }
     } catch (error) {
-      console.error(`[ACCOUNTING_FIX] Failed to fetch existing position bins:`, error);
       // Continue anyway - worst case is we get accounting error and user retries
     }
   }
@@ -844,21 +827,12 @@ export async function buildPoolCreationWithLiquidityTransactions(
     existingBinArrays.get(lowerBinIndex)!.push(binIndex);
   }
 
-  if (existingBinArrays.size > 0) {
-    console.log(`[POOL_CREATION] Found ${existingBinArrays.size} existing BinArrays:`);
-    for (const [lower, bins] of existingBinArrays.entries()) {
-      console.log(`  BinArray ${lower}: ${bins.length} bins (${bins[0]}-${bins[bins.length - 1]})`);
-    }
-  }
-
   // Identify which BinArrays are covered by new deposits
   const newBinArrays = new Set<number>();
   for (const deposit of depositsRaw) {
     const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
     newBinArrays.add(lowerBinIndex);
   }
-
-  console.log(`[POOL_CREATION] New deposits cover ${newBinArrays.size} BinArrays: [${Array.from(newBinArrays).join(", ")}]`);
 
   // Add minimum reference deposits (1 lamport) for existing BinArrays NOT in new deposits
   // This forces those BinArrays into the reconciliation check without significant economic impact
@@ -868,7 +842,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
     if (!newBinArrays.has(lowerBinIndex)) {
       // Validate bins array is not empty
       if (bins.length === 0) {
-        console.warn(`[POOL_CREATION] BinArray ${lowerBinIndex} has no bins, skipping reference deposit`);
         continue;
       }
 
@@ -880,14 +853,11 @@ export async function buildPoolCreationWithLiquidityTransactions(
         base_in: 1n, // 1 lamport minimum (satisfies > 0 requirement)
         quote_in: 0n,
       });
-
-      console.log(`[POOL_CREATION] Adding 1-lamport reference deposit for BinArray ${lowerBinIndex} (bin ${representativeBin})`);
     }
   }
 
   // Combine reference deposits + new deposits
   const allDeposits = [...referenceDeposits, ...depositsRaw];
-  console.log(`[POOL_CREATION] Total deposits: ${allDeposits.length} (${referenceDeposits.length} reference + ${depositsRaw.length} new)`);
 
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
   // Solana tx limit: 1232 bytes serialized
@@ -932,11 +902,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
           min_shares_out: new BN(0),
         });
       } catch (error) {
-        // CRITICAL: Log and skip invalid deposits instead of crashing
-        console.error(
-          `[POOL_CREATION] CRITICAL: Failed to create BN for deposit`,
-          { bin_index: d.bin_index, base_in: d.base_in, quote_in: d.quote_in, error }
-        );
+        // CRITICAL: Skip invalid deposits instead of crashing
         throw new Error(
           `Invalid deposit data at bin ${d.bin_index}: ${error instanceof Error ? error.message : String(error)}`
         );
@@ -945,7 +911,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
     // Skip empty batches (all deposits were invalid)
     if (deposits.length === 0) {
-      console.warn(`[POOL_CREATION] Batch ${i / BATCH_SIZE + 1} has no valid deposits, skipping`);
       continue;
     }
 

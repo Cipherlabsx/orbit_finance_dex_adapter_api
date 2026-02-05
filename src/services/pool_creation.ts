@@ -2,7 +2,9 @@
  * Pool Creation Service
  *
  * Builds unsigned transactions for creating new liquidity pools.
- * Follows Orbit Finance DLMM program IDL for init_pool and init_pool_vaults.
+ * Follows Orbit Finance DLMM program IDL for init_pool (merged with vault creation).
+ *
+ * OPTIMIZATION: init_pool and init_pool_vaults merged into single instruction (saves 1 tx).
  *
  * Security:
  * - Validates canonical mint ordering (base < quote)
@@ -83,7 +85,7 @@ export type PoolCreationWithLiquidityParams = PoolCreationParams & {
  */
 export type PoolCreationResult = {
   transactions: Array<{
-    type: "init_pool" | "init_pool_vaults" | "create_bin_arrays" | "init_position" | "init_position_bins" | "add_liquidity";
+    type: "init_pool" | "create_bin_arrays" | "init_position" | "init_position_bins" | "add_liquidity";
     instructions: SerializedInstruction[];
   }>;
   poolAddress: string;
@@ -205,12 +207,31 @@ function calculatePriceQ64_64(
  * Derives pool PDA
  * Seeds: ["pool", baseMint, quoteMint]
  */
-function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey): [PublicKey, number] {
+/**
+ * Derive pool PDA (Program Derived Address)
+ *
+ * CRITICAL: Pool address includes bin_step_bps to allow multiple pools per token pair.
+ * Each bin step represents a different liquidity distribution strategy:
+ * - Lower bin steps (1-10 bps) = tighter price ranges, better for stable pairs
+ * - Higher bin steps (50-400 bps) = wider price ranges, better for volatile pairs
+ *
+ * This enables the core DLMM design: traders choose pool granularity based on their needs.
+ *
+ * @param baseMint - Base token mint address
+ * @param quoteMint - Quote token mint address
+ * @param binStepBps - Bin step in basis points (determines price granularity)
+ * @returns Tuple of [pool PDA, bump seed]
+ */
+function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number): [PublicKey, number] {
+  const binStepBuffer = Buffer.alloc(2);
+  binStepBuffer.writeUInt16LE(binStepBps);
+
   return PublicKey.findProgramAddressSync(
     [
       Buffer.from("pool"),
       baseMint.toBuffer(),
       quoteMint.toBuffer(),
+      binStepBuffer,
     ],
     PROGRAM_ID
   );
@@ -321,18 +342,19 @@ function serializeInstruction(ix: TransactionInstruction): SerializedInstruction
 }
 
 /**
- * Builds pool creation transactions
+ * Builds pool creation transaction (OPTIMIZED: merged init_pool + init_pool_vaults)
  *
- * Returns 2 transactions:
- * 1. init_pool: Creates pool state, LP mint, and registry
- * 2. init_pool_vaults: Creates token vaults for pool
+ * Returns 1 transaction:
+ * 1. init_pool: Creates pool state, LP mint, registry, and all 6 token vaults (merged)
+ *
+ * OPTIMIZATION: Reduced from 2 transactions to 1 by merging vault creation into init_pool.
+ * Saves ~1 transaction fee (~0.000005 SOL) and reduces user signing burden.
  *
  * SECURITY:
  * - Validates all inputs before building transactions
  * - Returns unsigned transactions (frontend must sign)
  * - LP mint keypair generated CLIENT-SIDE (frontend only sends public key)
- * - Frontend must sign tx1 with both admin + lpMint keypairs
- * - Frontend must sign tx2 with admin keypair only
+ * - Frontend must sign with both admin + lpMint keypairs
  * - Secret keys NEVER transmitted over network
  */
 export async function buildPoolCreationTransactions(
@@ -372,7 +394,8 @@ export async function buildPoolCreationTransactions(
   const initialPriceQ64_64 = calculatePriceQ64_64(initialPrice, baseDecimals, quoteDecimals);
 
   // Derive PDAs
-  const [poolPda] = derivePoolPda(baseMintPk, quoteMintPk);
+  // CRITICAL: Pool PDA includes bin_step_bps to enable multiple pools per token pair
+  const [poolPda] = derivePoolPda(baseMintPk, quoteMintPk, binStepBps);
   const [registryPda] = deriveRegistryPda(baseMintPk, quoteMintPk);
 
   // SECURITY: Use client-provided LP mint public key (keypair generated on client)
@@ -396,6 +419,15 @@ export async function buildPoolCreationTransactions(
     accounting_mode: accountingMode,
   });
 
+  // Derive all vault PDAs (now created in same transaction as pool)
+  const [baseVaultPda] = deriveVaultPda(poolPda, "base");
+  const [quoteVaultPda] = deriveVaultPda(poolPda, "quote");
+  const [creatorFeeVaultPda] = deriveVaultPda(poolPda, "creator_fee");
+  const [holdersFeeVaultPda] = deriveVaultPda(poolPda, "holders_fee");
+  const [nftFeeVaultPda] = deriveVaultPda(poolPda, "nft_fee");
+  const [protocolFeeVaultPda] = deriveVaultPda(poolPda, "protocol_fee");
+
+  // Build merged init_pool instruction (creates pool + vaults in one transaction)
   const initPoolIx = new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
@@ -405,6 +437,12 @@ export async function buildPoolCreationTransactions(
       { pubkey: quoteMintPk, isSigner: false, isWritable: false },
       { pubkey: poolPda, isSigner: false, isWritable: true },
       { pubkey: lpMintPk, isSigner: true, isWritable: true },
+      { pubkey: baseVaultPda, isSigner: false, isWritable: true },
+      { pubkey: quoteVaultPda, isSigner: false, isWritable: true },
+      { pubkey: creatorFeeVaultPda, isSigner: false, isWritable: true },
+      { pubkey: holdersFeeVaultPda, isSigner: false, isWritable: true },
+      { pubkey: nftFeeVaultPda, isSigner: false, isWritable: true },
+      { pubkey: protocolFeeVaultPda, isSigner: false, isWritable: true },
       { pubkey: registryPda, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
@@ -412,46 +450,14 @@ export async function buildPoolCreationTransactions(
     data: initPoolData,
   });
 
-  // Build init_pool_vaults instruction
-  const [baseVaultPda] = deriveVaultPda(poolPda, "base");
-  const [quoteVaultPda] = deriveVaultPda(poolPda, "quote");
-  const [creatorFeeVaultPda] = deriveVaultPda(poolPda, "creator_fee");
-  const [holdersFeeVaultPda] = deriveVaultPda(poolPda, "holders_fee");
-  const [nftFeeVaultPda] = deriveVaultPda(poolPda, "nft_fee");
-  const [protocolFeeVaultPda] = deriveVaultPda(poolPda, "protocol_fee");
-
-  const initVaultsData = coder.instruction.encode("init_pool_vaults", {});
-
-  const initVaultsIx = new TransactionInstruction({
-    programId: PROGRAM_ID,
-    keys: [
-      { pubkey: adminPk, isSigner: true, isWritable: true },
-      { pubkey: poolPda, isSigner: false, isWritable: true },
-      { pubkey: baseMintPk, isSigner: false, isWritable: false },
-      { pubkey: quoteMintPk, isSigner: false, isWritable: false },
-      { pubkey: baseVaultPda, isSigner: false, isWritable: true },
-      { pubkey: quoteVaultPda, isSigner: false, isWritable: true },
-      { pubkey: creatorFeeVaultPda, isSigner: false, isWritable: true },
-      { pubkey: holdersFeeVaultPda, isSigner: false, isWritable: true },
-      { pubkey: nftFeeVaultPda, isSigner: false, isWritable: true },
-      { pubkey: protocolFeeVaultPda, isSigner: false, isWritable: true },
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data: initVaultsData,
-  });
-
-  // Add compute budget instructions
+  // Add compute budget instructions (increased limit for merged instruction)
   const priorityFeeMicroLamports = getPriorityFeeMicroLamports(priorityLevel);
-  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 });
+  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
   const computeUnitPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports });
 
-  // Create descriptive memos for wallet display
+  // Create descriptive memo for wallet display (merged transaction)
   const initPoolMemoIx = createMemoInstruction(
-    `Creating DLMM Pool | ${baseMintPk.toBase58().slice(0, 6)}.../${quoteMintPk.toBase58().slice(0, 6)}... | Bin Step: ${binStepBps}bps | Price: ${initialPrice}`
-  );
-  const initVaultsMemoIx = createMemoInstruction(
-    `Initializing Pool Vaults | Setting up token storage for liquidity`
+    `Creating DLMM Pool + Vaults | ${baseMintPk.toBase58().slice(0, 6)}.../${quoteMintPk.toBase58().slice(0, 6)}... | Bin Step: ${binStepBps}bps | Price: ${initialPrice}`
   );
 
   return {
@@ -465,15 +471,6 @@ export async function buildPoolCreationTransactions(
           serializeInstruction(initPoolIx),
         ],
       },
-      {
-        type: "init_pool_vaults",
-        instructions: [
-          serializeInstruction(computeUnitLimitIx),
-          serializeInstruction(computeUnitPriceIx),
-          serializeInstruction(initVaultsMemoIx),
-          serializeInstruction(initVaultsIx),
-        ],
-      },
     ],
     poolAddress: poolPda.toBase58(),
     lpMintPublicKey: lpMintPk.toBase58(), // SECURITY: Only public key, never secret
@@ -484,12 +481,17 @@ export async function buildPoolCreationTransactions(
 /**
  * Builds pool creation WITH initial liquidity transactions
  *
- * Returns 4 transaction groups:
- * 1. init_pool: Creates pool state, LP mint, and registry
- * 2. init_pool_vaults: Creates token vaults for pool
- * 3. create_bin_arrays: Creates bin arrays for liquidity distribution
- * 4. init_position: Creates position account
- * 5. add_liquidity: Deposits tokens into bins
+ * Returns transaction groups (OPTIMIZED Phase 1+2: reduced from 5-17 to 1-13 transactions):
+ * 1. init_pool: Creates pool state, LP mint, registry, and vaults (Phase 1: merged)
+ * 2. create_bin_arrays: Creates bin arrays for liquidity (Phase 2: only missing ones)
+ * 3. init_position: Creates position account (Phase 2: skipped if exists)
+ * 4. add_liquidity: Deposits tokens into bins (batched)
+ *
+ * init_pool + init_pool_vaults merged (saves 1 transaction).
+ * Smart account checking (saves 1-4 txs by skipping existing accounts).
+ * - Checks if Position exists, skips creation if found
+ * - Checks which BinArrays exist, only creates missing ones
+ * - Enables resuming failed pool creations without redundant transactions
  */
 export async function buildPoolCreationWithLiquidityTransactions(
   params: PoolCreationWithLiquidityParams,
@@ -542,14 +544,14 @@ export async function buildPoolCreationWithLiquidityTransactions(
     binArraysNeeded.add(arrayIndex * 64); // Lower bin index of the array
   }
 
-  // Check which bin arrays already exist on-chain
+  // OPTIMIZATION Phase 2: Check which bin arrays already exist on-chain (skip creating existing ones)
   const binArrayIndices = Array.from(binArraysNeeded).sort((a, b) => a - b);
   const binArrayPdas = binArrayIndices.map(lowerBinIdx => deriveBinArrayPda(poolPda, lowerBinIdx)[0]);
   const binArrayInfos = await connection.getMultipleAccountsInfo(binArrayPdas, "confirmed");
 
-  // Filter to only bin arrays that DON'T exist yet
+  // Filter to only bin arrays that DON'T exist yet (saves 1-3 transactions)
   const binArrayIndicesToCreate = binArrayIndices.filter((_, idx) => !binArrayInfos[idx]);
-  console.log(`[BIN_ARRAYS] Need ${binArrayIndices.length} bin arrays, ${binArrayIndicesToCreate.length} missing, ${binArrayIndices.length - binArrayIndicesToCreate.length} already exist`);
+  console.log(`[OPTIMIZATION] BinArrays: ${binArrayIndicesToCreate.length}/${binArrayIndices.length} need creation, ${binArrayIndices.length - binArrayIndicesToCreate.length} already exist (saved ${binArrayIndices.length - binArrayIndicesToCreate.length} create_bin_array calls)`);
 
   // Build create_bin_array instructions and batch them
   // Each create_bin_array instruction is ~150 bytes
@@ -601,30 +603,42 @@ export async function buildPoolCreationWithLiquidityTransactions(
     });
   }
 
-  // Build init_position instruction
+  // Check if Position already exists (OPTIMIZATION: skip creation if it exists)
   const positionNonce = BigInt(0); // First position for this user in this pool
   const [positionPda] = derivePositionPda(poolPda, adminPk, positionNonce);
 
-  const initPositionData = coder.instruction.encode("init_position", {
-    nonce: new BN(positionNonce.toString()),
-  });
+  const positionInfo = await connection.getAccountInfo(positionPda, "confirmed");
+  const positionExists = positionInfo !== null;
+  console.log(`[POSITION_CHECK] Position ${positionExists ? "already exists" : "needs creation"} at ${positionPda.toBase58()}`);
 
-  const initPositionIx = serializeInstruction(
-    new TransactionInstruction({
-      programId: PROGRAM_ID,
-      keys: [
-        { pubkey: poolPda, isSigner: false, isWritable: true },
-        { pubkey: adminPk, isSigner: true, isWritable: true },
-        { pubkey: positionPda, isSigner: false, isWritable: true },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ],
-      data: initPositionData,
-    })
-  );
+  // Build init_position instruction only if it doesn't exist
+  let initPositionIx: SerializedInstruction | null = null;
+  let initPositionMemoIx: SerializedInstruction | null = null;
 
-  const initPositionMemoIx = createMemoInstruction(
-    `Creating Liquidity Position | Owner: ${adminPk.toBase58().slice(0, 8)}...`
-  );
+  if (!positionExists) {
+    const initPositionData = coder.instruction.encode("init_position", {
+      nonce: new BN(positionNonce.toString()),
+    });
+
+    initPositionIx = serializeInstruction(
+      new TransactionInstruction({
+        programId: PROGRAM_ID,
+        keys: [
+          { pubkey: poolPda, isSigner: false, isWritable: true },
+          { pubkey: adminPk, isSigner: true, isWritable: true },
+          { pubkey: positionPda, isSigner: false, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data: initPositionData,
+      })
+    );
+
+    initPositionMemoIx = serializeInstruction(
+      createMemoInstruction(
+        `Creating Liquidity Position | Owner: ${adminPk.toBase58().slice(0, 8)}...`
+      )
+    );
+  }
 
   // Build add_liquidity_v2 instruction(s)
   const [baseVaultPda] = deriveVaultPda(poolPda, "base");
@@ -1011,23 +1025,31 @@ export async function buildPoolCreationWithLiquidityTransactions(
     });
   }
 
+  // Build transactions array (OPTIMIZATION: conditionally include init_position)
+  const allTransactions: typeof baseResult.transactions = [
+    ...baseResult.transactions,
+    ...createBinArrayTransactions,
+  ];
+
+  // Only add init_position if it doesn't exist (OPTIMIZATION: saves 1 tx)
+  if (initPositionIx && initPositionMemoIx) {
+    allTransactions.push({
+      type: "init_position",
+      instructions: [
+        serializeInstruction(computeUnitLimitIx),
+        serializeInstruction(computeUnitPriceIx),
+        initPositionMemoIx,
+        initPositionIx,
+      ],
+    });
+  }
+
+  allTransactions.push(...initPositionBinTransactions);
+  allTransactions.push(...addLiquidityTransactions);
+
   return {
     ...baseResult,
-    transactions: [
-      ...baseResult.transactions,
-      ...createBinArrayTransactions,
-      {
-        type: "init_position",
-        instructions: [
-          serializeInstruction(computeUnitLimitIx),
-          serializeInstruction(computeUnitPriceIx),
-          serializeInstruction(initPositionMemoIx),
-          initPositionIx,
-        ],
-      },
-      ...initPositionBinTransactions,
-      ...addLiquidityTransactions,
-    ],
+    transactions: allTransactions,
     positionAddress: positionPda.toBase58(),
   };
 }

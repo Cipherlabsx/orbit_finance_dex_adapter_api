@@ -804,8 +804,20 @@ export async function buildPoolCreationWithLiquidityTransactions(
   });
   const positionBinInfos = await connection.getMultipleAccountsInfo(positionBinPdas, "confirmed");
 
+  console.log(`[POOL_CREATION] Checking ${uniqueBinIndices.length} position bins for existence`);
+  console.log(`[POOL_CREATION] Bins to check: ${uniqueBinIndices.join(", ")}`);
+
+  // Log which bins exist vs don't exist
+  uniqueBinIndices.forEach((binIndex, idx) => {
+    const exists = positionBinInfos[idx] !== null;
+    const pda = positionBinPdas[idx].toBase58();
+    console.log(`[POOL_CREATION]   Bin ${binIndex}: ${exists ? "EXISTS" : "MISSING"} (PDA: ${pda.slice(0, 8)}...)`);
+  });
+
   // Filter to only position bins that DON'T exist yet
   let binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
+  console.log(`[POOL_CREATION] Position bins to create: ${binIndicesToCreate.length} (${binIndicesToCreate.join(", ")})`);
+  console.log(`[POOL_CREATION] Position bins already exist: ${uniqueBinIndices.length - binIndicesToCreate.length}`);
 
   // CRITICAL FIX: Check if position exists (not just current batch bins)
   // If position exists, previous add_liquidity txs succeeded and we need to fetch ALL existing bins

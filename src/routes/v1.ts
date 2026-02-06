@@ -18,7 +18,7 @@ import { getTokenPrice, getRelativePrice, getBatchPrices } from "../services/pri
 import { calculateHolderClaimable, calculateNftClaimable } from "../services/rewards.js";
 import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, type FeeConfig } from "../services/pool_creation.js";
 import { readPool } from "../services/pool_reader.js";
-import { upsertDexPool } from "../supabase.js";
+import { upsertDexPool, supabase } from "../supabase.js";
 import { connection } from "../solana.js";
 
 /**
@@ -487,7 +487,7 @@ export async function v1Routes(app: FastifyInstance) {
         };
       }
 
-      // Write to database
+      // Write to database with complete pool data
       await upsertDexPool({
         pool: body.poolAddress,
         programId: poolData.programId,
@@ -495,6 +495,17 @@ export async function v1Routes(app: FastifyInstance) {
         quoteMint: poolData.quoteMint,
         baseDecimals: poolData.baseDecimals,
         quoteDecimals: poolData.quoteDecimals,
+        baseVault: poolData.baseVault,
+        quoteVault: poolData.quoteVault,
+        admin: poolData.admin,
+        baseFeeBps: poolData.baseFeeBps,
+        binStepBps: poolData.binStepBps,
+        activeBin: poolData.activeBin,
+        initialBin: poolData.initialBin,
+        pausedBits: poolData.pausedBits,
+        creatorFeeVault: poolData.creatorFeeVault,
+        holdersFeeVault: poolData.holdersFeeVault,
+        nftFeeVault: poolData.nftFeeVault,
       });
 
       reply.header("cache-control", "no-store");
@@ -842,5 +853,63 @@ app.get("/tokens/prices", async (req, reply) => {
 
   reply.header("cache-control", "public, max-age=1"); // tiny cache, you poll anyway
   return { prices, ts: Date.now() };
+});
+
+// GET /api/v1/metrics
+// Monitoring metrics endpoint for health checks and performance tracking
+app.get("/metrics", async (req, reply) => {
+  try {
+    // Get latest indexed slot from dex_events
+    const { data: latestEvent } = await supabase
+      .from('dex_events')
+      .select('slot')
+      .order('slot', { ascending: false })
+      .limit(1);
+
+    const indexedSlot = latestEvent?.[0]?.slot ?? 0;
+
+    // Get current chain slot
+    const chainSlot = await connection.getSlot();
+
+    // Calculate lag (slots behind)
+    const slotLag = chainSlot - indexedSlot;
+
+    // Get pool counts
+    const { count: poolCount } = await supabase
+      .from('dex_pools')
+      .select('*', { count: 'exact', head: true });
+
+    // Get stale pool count (not updated in last 10 minutes)
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const { count: stalePools } = await supabase
+      .from('dex_pools')
+      .select('*', { count: 'exact', head: true })
+      .lt('updated_at', tenMinutesAgo);
+
+    // WebSocket client count (if wsHub exists)
+    const wsClients = req.server.wsHub?.size() ?? 0;
+
+    reply.header('cache-control', 'no-store');
+    return {
+      status: 'ok',
+      timestamp: Date.now(),
+      metrics: {
+        slot_lag: slotLag,
+        indexed_slot: indexedSlot,
+        chain_slot: chainSlot,
+        ws_clients: wsClients,
+        pools_total: poolCount ?? 0,
+        pools_stale: stalePools ?? 0,
+        uptime_seconds: Math.floor(process.uptime()),
+        memory_mb: Math.floor(process.memoryUsage().heapUsed / 1024 / 1024),
+      },
+    };
+  } catch (error) {
+    reply.code(500);
+    return {
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
 });
 }

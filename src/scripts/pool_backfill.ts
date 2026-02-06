@@ -27,6 +27,11 @@ type DexPoolRow = {
 
   active_bin: number | null;
   initial_bin: number | null;
+
+  admin: string | null;
+  creator_fee_vault: string | null;
+  holders_fee_vault: string | null;
+  nft_fee_vault: string | null;
 };
 
 function mustEnv(name: string): string {
@@ -169,6 +174,19 @@ function decodePoolToPatch(data: Buffer): Partial<DexPoolRow> | null {
     const binStepBps = asNumberU16(pickUnknown(raw, ["binStepBps", "bin_step_bps"]) ?? 0, "bin_step_bps");
     const baseFeeBps = asNumberU16(pickUnknown(raw, ["baseFeeBps", "base_fee_bps"]) ?? 0, "base_fee_bps");
 
+    // Extract authority and fee vault fields
+    const adminVal = pickUnknown(raw, ["admin"]);
+    const adminPk = adminVal != null ? asPk(adminVal, "admin") : null;
+
+    const creatorFeeVaultVal = pickUnknown(raw, ["creatorFeeVault", "creator_fee_vault"]);
+    const creatorFeeVaultPk = creatorFeeVaultVal != null ? asPk(creatorFeeVaultVal, "creator_fee_vault") : null;
+
+    const holdersFeeVaultVal = pickUnknown(raw, ["holdersFeeVault", "holders_fee_vault"]);
+    const holdersFeeVaultPk = holdersFeeVaultVal != null ? asPk(holdersFeeVaultVal, "holders_fee_vault") : null;
+
+    const nftFeeVaultVal = pickUnknown(raw, ["nftFeeVault", "nft_fee_vault"]);
+    const nftFeeVaultPk = nftFeeVaultVal != null ? asPk(nftFeeVaultVal, "nft_fee_vault") : null;
+
     return {
       base_vault: baseVaultPk.toBase58(),
       quote_vault: quoteVaultPk.toBase58(),
@@ -180,6 +198,11 @@ function decodePoolToPatch(data: Buffer): Partial<DexPoolRow> | null {
       paused_bits: pausedBits,
       bin_step_bps: binStepBps,
       base_fee_bps: baseFeeBps,
+
+      admin: adminPk ? adminPk.toBase58() : null,
+      creator_fee_vault: creatorFeeVaultPk ? creatorFeeVaultPk.toBase58() : null,
+      holders_fee_vault: holdersFeeVaultPk ? holdersFeeVaultPk.toBase58() : null,
+      nft_fee_vault: nftFeeVaultPk ? nftFeeVaultPk.toBase58() : null,
     };
   } catch {
     return null;
@@ -231,6 +254,10 @@ async function main() {
         "paused_bits",
         "active_bin",
         "initial_bin",
+        "admin",
+        "creator_fee_vault",
+        "holders_fee_vault",
+        "nft_fee_vault",
       ].join(",")
     );
 

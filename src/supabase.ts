@@ -39,20 +39,42 @@ export async function upsertDexPool(p: {
   quoteMint: string;
   baseDecimals: number;
   quoteDecimals: number;
+  baseVault?: string;
+  quoteVault?: string;
+  admin?: string;
+  baseFeeBps?: number;
+  binStepBps?: number;
+  activeBin?: number;
+  initialBin?: number;
+  pausedBits?: number;
+  creatorFeeVault?: string | null;
+  holdersFeeVault?: string | null;
+  nftFeeVault?: string | null;
 }) {
-  await upsertWithFallback(
-    "dex_pools",
-    {
-      pool: p.pool,
-      program_id: p.programId,
-      base_mint: p.baseMint,
-      quote_mint: p.quoteMint,
-      base_decimals: p.baseDecimals,
-      quote_decimals: p.quoteDecimals,
-      updated_at: nowIso(),
-    },
-    ["pool"]
-  );
+  const row: any = {
+    pool: p.pool,
+    program_id: p.programId,
+    base_mint: p.baseMint,
+    quote_mint: p.quoteMint,
+    base_decimals: p.baseDecimals,
+    quote_decimals: p.quoteDecimals,
+    updated_at: nowIso(),
+  };
+
+  // Add optional fields if provided
+  if (p.baseVault !== undefined) row.base_vault = p.baseVault;
+  if (p.quoteVault !== undefined) row.quote_vault = p.quoteVault;
+  if (p.admin !== undefined) row.admin = p.admin;
+  if (p.baseFeeBps !== undefined) row.base_fee_bps = p.baseFeeBps;
+  if (p.binStepBps !== undefined) row.bin_step_bps = p.binStepBps;
+  if (p.activeBin !== undefined) row.active_bin = p.activeBin;
+  if (p.initialBin !== undefined) row.initial_bin = p.initialBin;
+  if (p.pausedBits !== undefined) row.paused_bits = p.pausedBits;
+  if (p.creatorFeeVault !== undefined) row.creator_fee_vault = p.creatorFeeVault;
+  if (p.holdersFeeVault !== undefined) row.holders_fee_vault = p.holdersFeeVault;
+  if (p.nftFeeVault !== undefined) row.nft_fee_vault = p.nftFeeVault;
+
+  await upsertWithFallback("dex_pools", row, ["pool"]);
 }
 
 export async function writeDexTrade(trade: Trade) {

@@ -577,12 +577,50 @@ export async function v1Routes(app: FastifyInstance) {
 
   app.get("/pools/:pool", async (req) => {
     const params = z.object({ pool: z.string().min(32) }).parse(req.params);
+    const query = z.object({
+      includeBins: z.string().optional(),
+      radius: z.string().optional(),
+      limit: z.string().optional(),
+    }).parse(req.query);
 
     const notAllowed = assertPoolAllowed(params.pool);
     if (notAllowed) return notAllowed;
 
     const r = await dbGetPool(params.pool);
     if (!r) return { error: "pool_not_found", pool: params.pool };
+
+    // Parse bins if requested
+    let bins: any[] | undefined;
+    if (query.includeBins === "1" && r.bins) {
+      try {
+        const allBins = typeof r.bins === 'string' ? JSON.parse(r.bins) : r.bins;
+
+        if (Array.isArray(allBins) && allBins.length > 0) {
+          const radius = Math.min(800, Math.max(10, parseInt(query.radius || "60")));
+          const limit = Math.min(1500, Math.max(50, parseInt(query.limit || "180")));
+          const activeBin = r.active_bin ?? 0;
+
+          // Filter bins within radius of active bin
+          bins = allBins
+            .filter((b: any) => {
+              const binId = typeof b.binId === 'number' ? b.binId :
+                            typeof b.bin_id === 'number' ? b.bin_id : null;
+              if (binId === null) return false;
+              return Math.abs(binId - activeBin) <= radius;
+            })
+            .slice(0, limit)
+            .map((b: any) => ({
+              binId: b.binId ?? b.bin_id,
+              price: b.price,
+              baseUi: b.baseUi ?? b.base_ui ?? 0,
+              quoteUi: b.quoteUi ?? b.quote_ui ?? 0,
+            }));
+        }
+      } catch (e) {
+        // Invalid bins JSON - ignore
+        bins = undefined;
+      }
+    }
 
     return {
       id: r.pool,
@@ -614,6 +652,9 @@ export async function v1Routes(app: FastifyInstance) {
       pausedBits: r.paused_bits ?? 0,
       binStepBps: r.bin_step_bps ?? 0,
       baseFeeBps: r.base_fee_bps ?? 0,
+
+      // Include bins if requested
+      ...(bins ? { bins } : {}),
     };
   });
 

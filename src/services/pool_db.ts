@@ -29,6 +29,8 @@ export type DbPool = {
   nft_fee_ui: string | number | null;
   fees_updated_at: string | null;
   updated_at: string | null;
+  bins: string | object | null; // JSONB column storing bin liquidity data
+  bins_updated_at: string | null;
 };
 
 const POOL_SELECT =
@@ -61,6 +63,8 @@ const POOL_SELECT =
     "nft_fee_ui",
     "fees_updated_at",
     "updated_at",
+    "bins",
+    "bins_updated_at",
   ].join(",");
 
 export async function dbListPools(pools?: string[]) {

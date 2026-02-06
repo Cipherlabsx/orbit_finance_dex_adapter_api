@@ -113,19 +113,19 @@ export type SerializedInstruction = {
 const ALLOWED_BIN_STEPS = [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400];
 
 /**
- * Convert signed bin index (i32) to canonical u64 encoding for PDA derivation
- * Handles negative bin indices using two's complement
+ * Convert signed bin index (i32) to canonical u64 encoding
+ * Matches Rust's canonical encoding: (bin_index as i64) as u64
+ *
+ * This performs 64-bit sign extension for negative values, NOT 32-bit two's complement.
+ * Example: -1224 → 0xFFFFFFFFFFFFFB38 (18446744073709550392)
  *
  * @param binIndexSigned - Signed bin index (i32 range: -2147483648 to 2147483647)
- * @returns Canonical u64 encoding
+ * @returns Canonical u64 encoding (64-bit sign extension)
  */
 function binIndexToU64(binIndexSigned: number): bigint {
-  if (binIndexSigned >= 0) {
-    return BigInt(binIndexSigned);
-  } else {
-    // Two's complement for negative values (i32 -> u64)
-    return BigInt(0x100000000) + BigInt(binIndexSigned);
-  }
+  // Rust canonical encoding: (i32 as i64) as u64
+  // For negative numbers, this performs 64-bit sign extension
+  return BigInt(binIndexSigned) & 0xFFFFFFFFFFFFFFFFn;
 }
 
 

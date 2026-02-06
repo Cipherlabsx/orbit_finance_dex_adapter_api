@@ -145,72 +145,12 @@ const streamflowAgg = startStreamflowStakingAggregator({
 });
 
 /**
- * Startup behavior
+ * Startup behavior (non-blocking discovery only)
  */
 if (app.poolsList.length === 0) {
   await refreshPools("startup");
 }
 seedPoolsIntoTradeStore(app.poolsList);
-
-// init fees cache from DB (vault addresses + any prior balances)
-await initFeesFromDb(app.feesStore, app.poolsList);
-
-/**
- * Price cache will be initialized by the periodic refresh (every 10 seconds)
- * No need to block startup on CoinGecko API calls
- */
-
-/**
- * One-time historic backfill
- */
-await backfillTrades(app.tradeStore, app.poolsList);
-
-/**
- * seed volume + candles once from whatever is currently in tradeStore
- */
-await ingestFromTradeStore(app.volumeStore, app.tradeStore, app.poolsList);
-await ingestCandlesFromTradeStore(app.candleStore, app.tradeStore, app.poolsList);
-
-/**
- * Start polling-based trade indexer
- */
-const indexer = startTradeIndexer(app.tradeStore, app.poolsList);
-
-/**
- * start aggregators
- * (these loops will keep DB up to date via SERVICE_ROLE_KEY inside the aggregators)
- */
-const volumeAgg = startVolumeAggregator({
-  tradeStore: app.tradeStore,
-  volumeStore: app.volumeStore,
-  pools: app.poolsList,
-});
-
-const candleAgg = startCandleAggregator({
-  tradeStore: app.tradeStore,
-  candleStore: app.candleStore,
-  pools: app.poolsList,
-});
-
-// fees aggregator: when new swaps appear in tradeStore, refresh fee vault balances + write to dex_pools
-const feesAgg = startFeesAggregator({
-  tradeStore: app.tradeStore,
-  feesStore: app.feesStore,
-  pools: app.poolsList,
-  tickMs: 250,
-  debounceMs: 500,
-  minIntervalMs: 1000,
-});
-
-/**
- * Start WebSocket program log stream
- */
-const programStream = startProgramLogStream({
-  connection,
-  programId: PROGRAM_ID,
-  store: app.tradeStore,
-  wsHub: app.wsHub,
-});
 
 /**
  * Periodic discovery refresh
@@ -235,6 +175,15 @@ const priceInterval = setInterval(async () => {
 }, 10000);
 
 /**
+ * Declare variables for background services (will be initialized after server starts)
+ */
+let indexer: ReturnType<typeof startTradeIndexer>;
+let volumeAgg: ReturnType<typeof startVolumeAggregator>;
+let candleAgg: ReturnType<typeof startCandleAggregator>;
+let feesAgg: ReturnType<typeof startFeesAggregator>;
+let programStream: ReturnType<typeof startProgramLogStream>;
+
+/**
  * Graceful shutdown
  */
 const shutdown = async (signal: string) => {
@@ -242,13 +191,13 @@ const shutdown = async (signal: string) => {
   clearInterval(interval);
   clearInterval(priceInterval);
 
-  indexer.stop();
-  volumeAgg.stop();
-  candleAgg.stop();
-  feesAgg.stop();
+  if (indexer) indexer.stop();
+  if (volumeAgg) volumeAgg.stop();
+  if (candleAgg) candleAgg.stop();
+  if (feesAgg) feesAgg.stop();
 
   await streamflowAgg.stop().catch(() => {});
-  await programStream.stop().catch(() => {});
+  if (programStream) await programStream.stop().catch(() => {});
 
   try {
     await app.close();
@@ -261,7 +210,7 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 /**
- * Listen to server
+ * START SERVER FIRST (critical for fly health checks)
  */
 const port = Number(process.env.PORT ?? env.PORT ?? 8080);
 
@@ -281,3 +230,57 @@ app.log.info(
   },
   "orbit dex adapter api started"
 );
+
+/**
+ * BACKGROUND INITIALIZATION (runs after server is listening)
+ * These can take time and won't block the server from starting
+ */
+setImmediate(async () => {
+  try {
+    app.log.info("starting background initialization");
+
+    // Init fees cache from DB
+    await initFeesFromDb(app.feesStore, app.poolsList);
+    app.log.info("fees cache initialized");
+
+    // One-time historic backfill
+    await backfillTrades(app.tradeStore, app.poolsList);
+    app.log.info("trade backfill complete");
+
+    // Seed volume + candles from tradeStore
+    await ingestFromTradeStore(app.volumeStore, app.tradeStore, app.poolsList);
+    await ingestCandlesFromTradeStore(app.candleStore, app.tradeStore, app.poolsList);
+    app.log.info("volume and candles seeded");
+
+    // Start background services
+    indexer = startTradeIndexer(app.tradeStore, app.poolsList);
+    volumeAgg = startVolumeAggregator({
+      tradeStore: app.tradeStore,
+      volumeStore: app.volumeStore,
+      pools: app.poolsList,
+    });
+    candleAgg = startCandleAggregator({
+      tradeStore: app.tradeStore,
+      candleStore: app.candleStore,
+      pools: app.poolsList,
+    });
+    feesAgg = startFeesAggregator({
+      tradeStore: app.tradeStore,
+      feesStore: app.feesStore,
+      pools: app.poolsList,
+      tickMs: 250,
+      debounceMs: 500,
+      minIntervalMs: 1000,
+    });
+    programStream = startProgramLogStream({
+      connection,
+      programId: PROGRAM_ID,
+      store: app.tradeStore,
+      wsHub: app.wsHub,
+    });
+
+    app.log.info("all background services started");
+  } catch (err) {
+    app.log.error({ err }, "background initialization failed");
+  }
+});

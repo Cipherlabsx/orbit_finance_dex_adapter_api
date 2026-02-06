@@ -1070,14 +1070,54 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const BATCH_SIZE = 4;
   const addLiquidityTransactions: Array<{ type: "add_liquidity"; instructions: SerializedInstruction[] }> = [];
 
+  // CRITICAL FIX: Identify ALL BinArrays that will be populated across ALL transactions
+  // This is needed because transactions are built in a batch, and later transactions need to know
+  // about BinArrays that will be populated by earlier transactions in the batch
+  const allBinArraysInBatch = new Set<number>();
+  for (const deposit of allDeposits) {
+    const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
+    allBinArraysInBatch.add(lowerBinIndex);
+  }
+  console.log(`[POOL_CREATION] All BinArrays in batch: [${Array.from(allBinArraysInBatch).sort((a, b) => a - b).join(", ")}]`);
+
   for (let i = 0; i < allDeposits.length; i += BATCH_SIZE) {
     const batchDeposits = allDeposits.slice(i, Math.min(i + BATCH_SIZE, allDeposits.length));
+
+    // CRITICAL FIX: For THIS transaction, identify which BinArrays are in ITS deposits
+    const thisTxBinArrays = new Set<number>();
+    for (const deposit of batchDeposits) {
+      const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
+      thisTxBinArrays.add(lowerBinIndex);
+    }
+
+    // CRITICAL FIX: Add reference deposits (1 lamport) for ALL OTHER BinArrays in the batch
+    // This ensures vault reconciliation can see liquidity from other transactions in the batch
+    const crossTxReferenceDeposits: typeof batchDeposits = [];
+    for (const binArrayLower of allBinArraysInBatch) {
+      if (!thisTxBinArrays.has(binArrayLower)) {
+        // Find any bin in this BinArray from allDeposits
+        const representativeBin = allDeposits.find(
+          d => Math.floor(d.bin_index / 64) * 64 === binArrayLower
+        );
+        if (representativeBin) {
+          crossTxReferenceDeposits.push({
+            bin_index: representativeBin.bin_index,
+            base_in: 1n,  // 1 lamport minimum
+            quote_in: 0n,
+          });
+          console.log(`[POOL_CREATION] TX ${Math.floor(i / BATCH_SIZE) + 1}: Adding cross-tx reference deposit for BinArray ${binArrayLower} (bin ${representativeBin.bin_index})`);
+        }
+      }
+    }
+
+    // Combine cross-tx reference deposits + this transaction's deposits
+    const finalBatchDeposits = [...crossTxReferenceDeposits, ...batchDeposits];
 
     // Convert to BN for Borsh encoding
     // STRICT: Validate each deposit before BN construction to prevent crashes
     const deposits: Array<{ bin_index: BN; base_in: BN; quote_in: BN; min_shares_out: BN }> = [];
 
-    for (const d of batchDeposits) {
+    for (const d of finalBatchDeposits) {
       try {
         // STRICT: Pre-validate bin_index before BN construction
         if (typeof d.bin_index !== 'number' || !Number.isFinite(d.bin_index)) {
@@ -1127,7 +1167,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
     const POSITION_BIN_SEED = Buffer.from("position_bin");
     const remainingAccounts = [];
 
-    for (const deposit of batchDeposits) {
+    for (const deposit of finalBatchDeposits) {
       // Derive bin_array PDA
       const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64; // 64 bins per array (BIN_ARRAY_SIZE)
       const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIndex);

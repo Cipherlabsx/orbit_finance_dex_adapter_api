@@ -973,8 +973,10 @@ export async function buildPoolCreationWithLiquidityTransactions(
       );
 
       // Encode init_position_bin instruction
+      // CRITICAL: Convert negative bin indices to u64 for instruction data
+      const binIndexU64 = binIndexToU64(binIndex);
       const initPositionBinData = coder.instruction.encode("init_position_bin", {
-        bin_index: new BN(binIndex),
+        bin_index: new BN(binIndexU64.toString()),
       });
 
       const initPositionBinIx = serializeInstruction(
@@ -1096,8 +1098,9 @@ export async function buildPoolCreationWithLiquidityTransactions(
         }
 
         // Construct BNs with error handling
+        // CRITICAL: Convert negative bin indices to u64
         deposits.push({
-          bin_index: new BN(d.bin_index),
+          bin_index: new BN(binIndexToU64(d.bin_index).toString()),
           base_in: new BN(d.base_in.toString()),
           quote_in: new BN(d.quote_in.toString()),
           min_shares_out: new BN(0),

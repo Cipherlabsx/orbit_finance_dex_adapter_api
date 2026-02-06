@@ -112,6 +112,22 @@ export type SerializedInstruction = {
  */
 const ALLOWED_BIN_STEPS = [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400];
 
+/**
+ * Convert signed bin index (i32) to canonical u64 encoding for PDA derivation
+ * Handles negative bin indices using two's complement
+ *
+ * @param binIndexSigned - Signed bin index (i32 range: -2147483648 to 2147483647)
+ * @returns Canonical u64 encoding
+ */
+function binIndexToU64(binIndexSigned: number): bigint {
+  if (binIndexSigned >= 0) {
+    return BigInt(binIndexSigned);
+  } else {
+    // Two's complement for negative values (i32 -> u64)
+    return BigInt(0x100000000) + BigInt(binIndexSigned);
+  }
+}
+
 
 /**
  * Validates fee configuration
@@ -783,7 +799,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Check which position bins already exist on-chain
   const positionBinPdas = uniqueBinIndices.map(binIndex => {
     const binIndexBuffer = Buffer.alloc(8);
-    binIndexBuffer.writeBigUInt64LE(BigInt(binIndex));
+    binIndexBuffer.writeBigUInt64LE(binIndexToU64(binIndex));
     return PublicKey.findProgramAddressSync(
       [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
       PROGRAM_ID
@@ -950,7 +966,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
     for (const binIndex of batchBinIndices) {
       // Derive position_bin PDA
       const binIndexBuffer = Buffer.alloc(8);
-      binIndexBuffer.writeBigUInt64LE(BigInt(binIndex));
+      binIndexBuffer.writeBigUInt64LE(binIndexToU64(binIndex));
       const [positionBinPda] = PublicKey.findProgramAddressSync(
         [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
         PROGRAM_ID
@@ -1116,7 +1132,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
       // Derive position_bin PDA
       // Seeds: ["position_bin", position_key, bin_index (u64 LE)]
       const binIndexBuffer = Buffer.alloc(8);
-      binIndexBuffer.writeBigUInt64LE(BigInt(deposit.bin_index));
+      binIndexBuffer.writeBigUInt64LE(binIndexToU64(deposit.bin_index));
       const [positionBinPda] = PublicKey.findProgramAddressSync(
         [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
         PROGRAM_ID

@@ -850,14 +850,16 @@ export async function buildPoolCreationWithLiquidityTransactions(
       const newBinIndices = depositsRaw.map(d => d.bin_index);
 
       for (const { account } of existingPositionBins) {
-        // PositionBin structure: discriminator(8) + position(32) + bin_index(8) + ...
+        // PositionBin structure: discriminator(8) + position(32) + pool(32) + bin_index(8) + ...
         // CRITICAL: bin_index is stored as u64 (8 bytes), not i32 (4 bytes)
         const binIndexU64 = account.data.readBigUInt64LE(72); // bin_index at offset 72 (8 + 32 + 32)
 
-        // Convert from unsigned u64 to signed i32 (bin_index is logically i32)
-        const binIndexI32 = binIndexU64 < 0x80000000n
-          ? Number(binIndexU64)
-          : Number(binIndexU64) - 0x100000000;
+        // Convert from u64 canonical encoding to signed i32
+        // Rust stores: (bin_index_i32 as i64) as u64
+        // For negative values, this performs 64-bit sign extension
+        // To reverse: extract lower 32 bits and interpret as signed i32
+        const lower32 = Number(binIndexU64 & 0xFFFFFFFFn);
+        const binIndexI32 = lower32 >= 0x80000000 ? lower32 - 0x100000000 : lower32;
 
         // Only include bins NOT in the new deposits (to avoid duplicates)
         if (!newBinIndices.includes(binIndexI32)) {

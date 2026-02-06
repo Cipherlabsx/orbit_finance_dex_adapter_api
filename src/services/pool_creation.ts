@@ -840,7 +840,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
         {
           commitment: "confirmed",
           filters: [
-            { dataSize: 144 }, // PositionBin account size (corrected from 88)
+            { dataSize: 136 }, // PositionBin: 8 (disc) + 32 (pos) + 32 (pool) + 8 (idx) + 16 (shares) + 16 (fee_base) + 16 (fee_quote) + 8 (ts) = 136
             { memcmp: { offset: 8, bytes: positionPda.toBase58() } }, // Position field at offset 8
           ],
         }

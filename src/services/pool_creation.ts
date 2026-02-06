@@ -7,7 +7,7 @@
  * OPTIMIZATION: init_pool and init_pool_vaults merged into single instruction (saves 1 tx).
  *
  * Security:
- * - Validates canonical mint ordering (base < quote)
+ * - Allows any mint ordering (no canonical requirement - like Meteora)
  * - Validates fee configuration (splits must sum to 100,000 microbps)
  * - Validates bin step against allowed values
  * - Only returns unsigned transactions (frontend signs)
@@ -112,26 +112,6 @@ export type SerializedInstruction = {
  */
 const ALLOWED_BIN_STEPS = [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400];
 
-/**
- * Validates that mints are in canonical order (base < quote lexicographically)
- */
-function validateCanonicalOrder(base: PublicKey, quote: PublicKey): void {
-  const baseBytes = base.toBytes();
-  const quoteBytes = quote.toBytes();
-
-  for (let i = 0; i < 32; i++) {
-    if (baseBytes[i]! < quoteBytes[i]!) return; // base < quote, OK
-    if (baseBytes[i]! > quoteBytes[i]!) {
-      throw new Error(
-        `Mints must be in canonical order (base < quote). ` +
-        `Swap baseMint and quoteMint. Base: ${base.toBase58()}, Quote: ${quote.toBase58()}`
-      );
-    }
-  }
-
-  // All bytes equal - this is invalid (same mint used twice)
-  throw new Error("baseMint and quoteMint cannot be the same");
-}
 
 /**
  * Validates fee configuration
@@ -386,8 +366,7 @@ export async function buildPoolCreationTransactions(
   const baseMintPk = new PublicKey(baseMint);
   const quoteMintPk = new PublicKey(quoteMint);
 
-  // Validate inputs
-  validateCanonicalOrder(baseMintPk, quoteMintPk);
+  // Validate inputs (canonical ordering removed - pools can be in any direction)
   validateBinStep(binStepBps);
   validateFeeConfig(feeConfig);
 

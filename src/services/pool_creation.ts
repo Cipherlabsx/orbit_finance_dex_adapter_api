@@ -790,38 +790,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
     ASSOCIATED_TOKEN_PROGRAM_ID
   );
 
-  // Collect unique bin indices and create init_position_bin instructions
-  // CRITICAL: Position bins must be initialized before add_liquidity_v2 can use them
-  const uniqueBinIndices = Array.from(new Set(depositsRaw.map(d => d.bin_index))).sort((a, b) => a - b);
-
-  const POSITION_BIN_SEED = Buffer.from("position_bin");
-
-  // Check which position bins already exist on-chain
-  const positionBinPdas = uniqueBinIndices.map(binIndex => {
-    const binIndexBuffer = Buffer.alloc(8);
-    binIndexBuffer.writeBigUInt64LE(binIndexToU64(binIndex));
-    return PublicKey.findProgramAddressSync(
-      [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
-      PROGRAM_ID
-    )[0];
-  });
-  const positionBinInfos = await connection.getMultipleAccountsInfo(positionBinPdas, "confirmed");
-
-  console.log(`[POOL_CREATION] Checking ${uniqueBinIndices.length} position bins for existence`);
-  console.log(`[POOL_CREATION] Bins to check: ${uniqueBinIndices.join(", ")}`);
-
-  // Log which bins exist vs don't exist
-  uniqueBinIndices.forEach((binIndex, idx) => {
-    const exists = positionBinInfos[idx] !== null;
-    const pda = positionBinPdas[idx].toBase58();
-    console.log(`[POOL_CREATION]   Bin ${binIndex}: ${exists ? "EXISTS" : "MISSING"} (PDA: ${pda.slice(0, 8)}...)`);
-  });
-
-  // Filter to only position bins that DON'T exist yet
-  let binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
-  console.log(`[POOL_CREATION] Position bins to create: ${binIndicesToCreate.length} (${binIndicesToCreate.join(", ")})`);
-  console.log(`[POOL_CREATION] Position bins already exist: ${uniqueBinIndices.length - binIndicesToCreate.length}`);
-
   // CRITICAL FIX: Check if position exists (not just current batch bins)
   // If position exists, previous add_liquidity txs succeeded and we need to fetch ALL existing bins
   // to include them in reconciliation via reference deposits
@@ -830,6 +798,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // ROBUST FIX: If position exists, use getProgramAccounts to find ALL existing position bins
   // This ensures we don't miss ANY liquidity regardless of distance from current deposits
   let allExistingBinIndices: number[] = [];
+  let binIndicesToCreate: number[] = []; // Will be populated after reference deposits are calculated
 
   if (hasExistingBins) {
     try {
@@ -955,6 +924,102 @@ export async function buildPoolCreationWithLiquidityTransactions(
     }
   }
 
+  // CRITICAL FIX: Calculate reference deposits BEFORE position bin creation
+  // This ensures ALL bins used in add_liquidity (including cross-tx references) have position bins created
+
+  // Group existing bins by their BinArray
+  const existingBinArrays = new Map<number, number[]>(); // lowerBinIndex -> binIndices[]
+
+  for (const binIndex of allExistingBinIndices) {
+    const lowerBinIndex = Math.floor(binIndex / 64) * 64;
+
+    if (!existingBinArrays.has(lowerBinIndex)) {
+      existingBinArrays.set(lowerBinIndex, []);
+    }
+    existingBinArrays.get(lowerBinIndex)!.push(binIndex);
+  }
+
+  // Identify which BinArrays are covered by new deposits
+  const newBinArrays = new Set<number>();
+  for (const deposit of depositsRaw) {
+    const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
+    newBinArrays.add(lowerBinIndex);
+  }
+
+  console.log(`[POOL_CREATION] New deposits cover ${newBinArrays.size} BinArrays: [${Array.from(newBinArrays).sort((a, b) => a - b).join(", ")}]`);
+
+  // Add minimum reference deposits (1 lamport) for existing BinArrays NOT in new deposits
+  // This forces those BinArrays into the reconciliation check without significant economic impact
+  const referenceDeposits: Array<{ bin_index: number; base_in: bigint; quote_in: bigint }> = [];
+
+  for (const [lowerBinIndex, bins] of existingBinArrays.entries()) {
+    if (!newBinArrays.has(lowerBinIndex)) {
+      // Validate bins array is not empty
+      if (bins.length === 0) {
+        continue;
+      }
+
+      // Pick first bin as representative (Rust program deduplicates BinArrays in HashMap)
+      const representativeBin = bins[0];
+
+      referenceDeposits.push({
+        bin_index: representativeBin,
+        base_in: 1n, // 1 lamport minimum (satisfies > 0 requirement)
+        quote_in: 0n,
+      });
+
+      console.log(`[POOL_CREATION] Adding 1-lamport reference deposit for BinArray ${lowerBinIndex} (bin ${representativeBin})`);
+    }
+  }
+
+  // Combine reference deposits + new deposits for position bin creation
+  const allDepositsForPositionBinCreation = [...referenceDeposits, ...depositsRaw];
+  console.log(`[POOL_CREATION] Total deposits for position bin creation: ${allDepositsForPositionBinCreation.length} (${referenceDeposits.length} reference + ${depositsRaw.length} new)`);
+
+  // Collect unique bin indices and create init_position_bin instructions
+  // CRITICAL: Position bins must be initialized before add_liquidity_v2 can use them
+  const uniqueBinIndices = Array.from(new Set(allDepositsForPositionBinCreation.map(d => d.bin_index))).sort((a, b) => a - b);
+
+  const POSITION_BIN_SEED = Buffer.from("position_bin");
+
+  // Check which position bins already exist on-chain
+  const positionBinPdas = uniqueBinIndices.map(binIndex => {
+    const binIndexBuffer = Buffer.alloc(8);
+    binIndexBuffer.writeBigUInt64LE(binIndexToU64(binIndex));
+    return PublicKey.findProgramAddressSync(
+      [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
+      PROGRAM_ID
+    )[0];
+  });
+  const positionBinInfos = await connection.getMultipleAccountsInfo(positionBinPdas, "confirmed");
+
+  console.log(`[POOL_CREATION] Checking ${uniqueBinIndices.length} position bins for existence`);
+  console.log(`[POOL_CREATION] Bins to check: ${uniqueBinIndices.join(", ")}`);
+
+  // Log which bins exist vs don't exist
+  uniqueBinIndices.forEach((binIndex, idx) => {
+    const exists = positionBinInfos[idx] !== null;
+    const pda = positionBinPdas[idx].toBase58();
+    console.log(`[POOL_CREATION]   Bin ${binIndex}: ${exists ? "EXISTS" : "MISSING"} (PDA: ${pda.slice(0, 8)}...)`);
+  });
+
+  // Filter to only position bins that DON'T exist yet
+  binIndicesToCreate = uniqueBinIndices.filter((_, idx) => !positionBinInfos[idx]);
+  console.log(`[POOL_CREATION] Position bins to create: ${binIndicesToCreate.length} (${binIndicesToCreate.join(", ")})`);
+  console.log(`[POOL_CREATION] Position bins already exist: ${uniqueBinIndices.length - binIndicesToCreate.length}`);
+
+  // Verify all bins in allDepositsForPositionBinCreation will have position bins
+  const missingBins = allDepositsForPositionBinCreation
+    .map(d => d.bin_index)
+    .filter(idx => !uniqueBinIndices.includes(idx));
+
+  if (missingBins.length > 0) {
+    console.error(`[POOL_CREATION] BUG: Some bins in deposits won't have position bins created: [${missingBins.join(", ")}]`);
+    throw new Error(`Position bin creation bug: ${missingBins.length} bins missing`);
+  }
+
+  console.log(`[POOL_CREATION] ✅ All ${allDepositsForPositionBinCreation.length} deposit bins will have position bins created`);
+
   // Batch init_position_bin instructions to avoid transaction size limit
   // Each init_position_bin instruction is ~150 bytes
   // Safe batch size: ~5-6 instructions per transaction to stay under 1232 bytes
@@ -1015,54 +1080,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
     });
   }
 
-  // Group existing bins by their BinArray
-  const existingBinArrays = new Map<number, number[]>(); // lowerBinIndex -> binIndices[]
-
-  for (const binIndex of allExistingBinIndices) {
-    const lowerBinIndex = Math.floor(binIndex / 64) * 64;
-
-    if (!existingBinArrays.has(lowerBinIndex)) {
-      existingBinArrays.set(lowerBinIndex, []);
-    }
-    existingBinArrays.get(lowerBinIndex)!.push(binIndex);
-  }
-
-  // Identify which BinArrays are covered by new deposits
-  const newBinArrays = new Set<number>();
-  for (const deposit of depositsRaw) {
-    const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
-    newBinArrays.add(lowerBinIndex);
-  }
-
-  // Add minimum reference deposits (1 lamport) for existing BinArrays NOT in new deposits
-  // This forces those BinArrays into the reconciliation check without significant economic impact
-  const referenceDeposits: Array<{ bin_index: number; base_in: bigint; quote_in: bigint }> = [];
-
-  for (const [lowerBinIndex, bins] of existingBinArrays.entries()) {
-    if (!newBinArrays.has(lowerBinIndex)) {
-      // Validate bins array is not empty
-      if (bins.length === 0) {
-        continue;
-      }
-
-      // Pick first bin as representative (Rust program deduplicates BinArrays in HashMap)
-      const representativeBin = bins[0];
-
-      referenceDeposits.push({
-        bin_index: representativeBin,
-        base_in: 1n, // 1 lamport minimum (satisfies > 0 requirement)
-        quote_in: 0n,
-      });
-
-      console.log(`[POOL_CREATION] Adding 1-lamport reference deposit for BinArray ${lowerBinIndex} (bin ${representativeBin})`);
-    }
-  }
-
-  // Combine reference deposits + new deposits
-  const allDeposits = [...referenceDeposits, ...depositsRaw];
-
-  console.log(`[POOL_CREATION] Total deposits: ${allDeposits.length} (${referenceDeposits.length} reference + ${depositsRaw.length} new)`);
-  console.log(`[POOL_CREATION] New deposits cover ${newBinArrays.size} BinArrays: [${Array.from(newBinArrays).sort((a, b) => a - b).join(", ")}]`);
+  // Use the pre-calculated allDepositsForPositionBinCreation (already includes reference deposits)
+  const allDeposits = allDepositsForPositionBinCreation;
 
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
   // Solana tx limit: 1232 bytes serialized

@@ -1081,7 +1081,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const existingBinArrays = new Map<number, number[]>(); // lowerBinIndex -> binIndices[]
 
   for (const binIndex of allExistingBinIndices) {
-    const lowerBinIndex = Math.floor(binIndex / 64) * 64;
+    const lowerBinIndex = Math.trunc(binIndex / 64) * 64;
 
     if (!existingBinArrays.has(lowerBinIndex)) {
       existingBinArrays.set(lowerBinIndex, []);
@@ -1092,7 +1092,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Identify which BinArrays are covered by new deposits
   const newBinArrays = new Set<number>();
   for (const deposit of depositsRaw) {
-    const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
+    const lowerBinIndex = Math.trunc(deposit.bin_index / 64) * 64;
     newBinArrays.add(lowerBinIndex);
   }
 
@@ -1248,7 +1248,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // about BinArrays that will be populated by earlier transactions in the batch
   const allBinArraysInBatch = new Set<number>();
   for (const deposit of allDeposits) {
-    const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
+    const lowerBinIndex = Math.trunc(deposit.bin_index / 64) * 64;
     allBinArraysInBatch.add(lowerBinIndex);
   }
   console.log(`[POOL_CREATION] All BinArrays in batch: [${Array.from(allBinArraysInBatch).sort((a, b) => a - b).join(", ")}]`);
@@ -1259,7 +1259,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
     // CRITICAL FIX: For THIS transaction, identify which BinArrays are in ITS deposits
     const thisTxBinArrays = new Set<number>();
     for (const deposit of batchDeposits) {
-      const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64;
+      const lowerBinIndex = Math.trunc(deposit.bin_index / 64) * 64;
       thisTxBinArrays.add(lowerBinIndex);
     }
 
@@ -1275,7 +1275,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
       if (!thisTxBinArrays.has(binArrayLower) && refCount < MAX_REFERENCE_DEPOSITS) {
         // Find any bin in this BinArray from allDeposits
         const representativeBin = allDeposits.find(
-          d => Math.floor(d.bin_index / 64) * 64 === binArrayLower
+          d => Math.trunc(d.bin_index / 64) * 64 === binArrayLower
         );
         if (representativeBin) {
           crossTxReferenceDeposits.push({
@@ -1352,7 +1352,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
     for (const deposit of finalBatchDeposits) {
       // Derive bin_array PDA
-      const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64; // 64 bins per array (BIN_ARRAY_SIZE)
+      const lowerBinIndex = Math.trunc(deposit.bin_index / 64) * 64; // 64 bins per array (BIN_ARRAY_SIZE)
       const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIndex);
 
       // SECURITY FIX: Derive position_bin PDA using i32 (4 bytes), not u64 (8 bytes)
@@ -1812,7 +1812,11 @@ export async function buildPoolCreationBatchTransactions(
 
     for (const deposit of batchDeposits) {
       const binIndexI32 = deposit.bin_index;
-      const lowerBinIdx = Math.floor(binIndexI32 / 64) * 64;
+      // CRITICAL: Use Math.trunc (truncate towards zero), NOT Math.floor
+      // Rust: (bin_index / 64) * 64 truncates towards zero
+      // Math.floor rounds towards -infinity, wrong for negative bins
+      // Example: bin -10 → Rust: 0, JS floor: -64 ❌
+      const lowerBinIdx = Math.trunc(binIndexI32 / 64) * 64;
 
       const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIdx);
       // SECURITY FIX: Pass i32 directly for PDA derivation (not u64)

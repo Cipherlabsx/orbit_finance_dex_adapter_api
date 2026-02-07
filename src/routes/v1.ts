@@ -610,6 +610,125 @@ export async function v1Routes(app: FastifyInstance) {
     }
   });
 
+  /**
+   * GET /pool/recovery?wallet=<address>
+   *
+   * Scans for orphaned pools (liquidity_quote = 0) belonging to the wallet
+   */
+  app.get("/pool/recovery", async (req, reply) => {
+    try {
+      const query = z.object({ wallet: z.string().min(32) }).parse(req.query);
+      const wallet = query.wallet;
+
+      // Validate wallet address
+      try {
+        new PublicKey(wallet);
+      } catch {
+        return reply.status(400).send({
+          error: "invalid_wallet",
+          message: "Invalid wallet address",
+        });
+      }
+
+      // Query database for pools with no liquidity owned by this wallet
+      const { data: pools, error: dbError } = await supabase
+        .from("dex_pools")
+        .select("*")
+        .eq("admin", wallet)
+        .eq("liquidity_quote", "0")
+        .order("updated_at", { ascending: false });
+
+      if (dbError) {
+        console.error("[RECOVERY] Database error:", dbError);
+        return reply.status(500).send({
+          error: "database_error",
+          message: "Failed to query pools",
+        });
+      }
+
+      if (!pools || pools.length === 0) {
+        return reply.send({
+          orphanedPools: [],
+          scannedAt: new Date().toISOString(),
+        });
+      }
+
+      // Verify on-chain for each pool
+      const orphanedPools = [];
+
+      for (const pool of pools) {
+        try {
+          // Check if vaults have any balance
+          const baseVaultPubkey = new PublicKey(pool.base_vault);
+          const quoteVaultPubkey = new PublicKey(pool.quote_vault);
+
+          const [baseVaultInfo, quoteVaultInfo] = await Promise.all([
+            connection.getAccountInfo(baseVaultPubkey),
+            connection.getAccountInfo(quoteVaultPubkey),
+          ]);
+
+          // Parse token account data (offset 64 = amount as u64 LE)
+          const getTokenBalance = (accountInfo: any): bigint => {
+            if (!accountInfo?.data || accountInfo.data.length < 72) return 0n;
+            const buffer = Buffer.from(accountInfo.data);
+            return buffer.readBigUInt64LE(64);
+          };
+
+          const baseBalance = getTokenBalance(baseVaultInfo);
+          const quoteBalance = getTokenBalance(quoteVaultInfo);
+          const hasOnChainLiquidity = baseBalance > 0n || quoteBalance > 0n;
+
+          orphanedPools.push({
+            pool: pool.pool,
+            base_mint: pool.base_mint,
+            quote_mint: pool.quote_mint,
+            base_decimals: pool.base_decimals,
+            quote_decimals: pool.quote_decimals,
+            base_vault: pool.base_vault,
+            quote_vault: pool.quote_vault,
+            bin_step_bps: pool.bin_step_bps,
+            active_bin: pool.active_bin,
+            liquidity_quote: pool.liquidity_quote,
+            admin: pool.admin,
+            created_at: pool.updated_at,
+            hasOnChainLiquidity,
+            needsRecovery: !hasOnChainLiquidity,
+          });
+        } catch (error) {
+          console.error(`[RECOVERY] Error checking pool ${pool.pool}:`, error);
+          // Include pool in list even if on-chain check failed
+          orphanedPools.push({
+            pool: pool.pool,
+            base_mint: pool.base_mint,
+            quote_mint: pool.quote_mint,
+            base_decimals: pool.base_decimals,
+            quote_decimals: pool.quote_decimals,
+            base_vault: pool.base_vault,
+            quote_vault: pool.quote_vault,
+            bin_step_bps: pool.bin_step_bps,
+            active_bin: pool.active_bin,
+            liquidity_quote: pool.liquidity_quote,
+            admin: pool.admin,
+            created_at: pool.updated_at,
+            hasOnChainLiquidity: false,
+            needsRecovery: true,
+          });
+        }
+      }
+
+      return reply.send({
+        orphanedPools,
+        scannedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("[RECOVERY] Unexpected error:", error);
+      return reply.status(500).send({
+        error: "internal_error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  });
+
   app.get("/pools", async () => {
     const pools = getActivePools(app);
 

@@ -1780,10 +1780,20 @@ export async function buildPoolCreationBatchTransactions(
   );
 
   // Build add_liquidity_batch transactions
-  // Max 15 bins per transaction (transaction size limit ~1232 bytes)
-  // Each bin needs: BinArray (32 bytes) + PositionBin (32 bytes) = 64 bytes
-  // 15 bins = 960 bytes for remaining accounts + ~272 bytes for instruction = ~1232 bytes total
-  const MAX_BINS_PER_BATCH = 15;
+  // CRITICAL: Solana transaction size limit is 1232 bytes
+  // Actual size calculation per transaction:
+  // - Base instruction accounts: 10 accounts × 34 bytes = 340 bytes
+  // - Compute budget + Memo: ~150 bytes
+  // - Instruction data: N deposits × 32 bytes
+  // - Remaining accounts: N bins × 2 accounts × 34 bytes = N × 68 bytes
+  // - Total per bin: 32 + 68 = 100 bytes
+  // - Safe budget: 1232 - 490 (base) = 742 bytes
+  // - Max bins: 742 / 100 = 7.4 → 7 bins (conservative)
+  //
+  // Using 8 bins for balance between transaction count and safety:
+  // 8 bins = 490 + (8 × 100) = 1290 bytes (needs verification but close to limit)
+  // Reducing to 7 bins to ensure safety margin: 490 + (7 × 100) = 1190 bytes ✓
+  const MAX_BINS_PER_BATCH = 7;
   const batchedDeposits: Array<typeof depositsRaw> = [];
 
   for (let i = 0; i < depositsRaw.length; i += MAX_BINS_PER_BATCH) {

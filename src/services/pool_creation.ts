@@ -1133,11 +1133,11 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const POSITION_BIN_SEED = Buffer.from("position_bin");
 
   // Check which position bins already exist on-chain
-  // SECURITY FIX: Use i32 (4 bytes) to match PDA derivation in derivePositionBinPda
-  // Previous code used u64 (8 bytes) which caused PDA mismatches - checks always returned "missing"
+  // CRITICAL FIX: Use u64 (8 bytes) to match Rust program's derive_position_bin_pda
   const positionBinPdas = uniqueBinIndices.map(binIndex => {
-    const binIndexBuffer = Buffer.alloc(4);
-    binIndexBuffer.writeInt32LE(binIndex);
+    const binIndexU64 = binIndexToU64(binIndex);
+    const binIndexBuffer = Buffer.alloc(8);
+    binIndexBuffer.writeBigUInt64LE(binIndexU64, 0);
     return PublicKey.findProgramAddressSync(
       [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
       PROGRAM_ID
@@ -1183,17 +1183,16 @@ export async function buildPoolCreationWithLiquidityTransactions(
     const batchInstructions: SerializedInstruction[] = [];
 
     for (const binIndex of batchBinIndices) {
-      // SECURITY FIX: Derive position_bin PDA using i32 (4 bytes), not u64 (8 bytes)
-      const binIndexBuffer = Buffer.alloc(4);
-      binIndexBuffer.writeInt32LE(binIndex);
+      // CRITICAL FIX: Use u64 (8 bytes) for PositionBin PDA to match Rust program
+      const binIndexU64 = binIndexToU64(binIndex);
+      const binIndexBuffer = Buffer.alloc(8);
+      binIndexBuffer.writeBigUInt64LE(binIndexU64, 0);
       const [positionBinPda] = PublicKey.findProgramAddressSync(
         [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
         PROGRAM_ID
       );
 
       // Encode init_position_bin instruction
-      // NOTE: Instruction data still uses u64 as per IDL, but PDA uses i32
-      const binIndexU64 = binIndexToU64(binIndex);
       const initPositionBinData = coder.instruction.encode("init_position_bin", {
         bin_index: new BN(binIndexU64.toString()),
       });
@@ -1355,10 +1354,11 @@ export async function buildPoolCreationWithLiquidityTransactions(
       const lowerBinIndex = Math.trunc(deposit.bin_index / 64) * 64; // 64 bins per array (BIN_ARRAY_SIZE)
       const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIndex);
 
-      // SECURITY FIX: Derive position_bin PDA using i32 (4 bytes), not u64 (8 bytes)
-      // Seeds: ["position_bin", position_key, bin_index (i32 LE)]
-      const binIndexBuffer = Buffer.alloc(4);
-      binIndexBuffer.writeInt32LE(deposit.bin_index);
+      // CRITICAL FIX: Derive position_bin PDA using u64 (8 bytes) to match Rust program
+      // Seeds: ["position_bin", position_key, bin_index (u64 LE)]
+      const binIndexU64 = binIndexToU64(deposit.bin_index);
+      const binIndexBuffer = Buffer.alloc(8);
+      binIndexBuffer.writeBigUInt64LE(binIndexU64, 0);
       const [positionBinPda] = PublicKey.findProgramAddressSync(
         [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
         PROGRAM_ID
@@ -1891,14 +1891,16 @@ export async function buildPoolCreationBatchTransactions(
 
 /**
  * Derives position bin PDA
- * SECURITY: Seeds use i32 (4 bytes), not u64 (8 bytes)
- * Seeds: ["position_bin", position, bin_index (i32, little-endian)]
+ * CRITICAL: Rust program uses u64 (8 bytes) for bin_index seed
+ * Seeds: ["position_bin", position, bin_index (u64, little-endian)]
  */
 function derivePositionBinPda(position: PublicKey, binIndexI32: number): [PublicKey, number] {
-  // SECURITY FIX: Use i32 (4 bytes) to match Rust program PDA derivation
-  // Previous version used u64 (8 bytes) which caused PDA mismatches
-  const binIndexBuffer = Buffer.alloc(4);
-  binIndexBuffer.writeInt32LE(binIndexI32, 0);
+  // CRITICAL FIX: Use u64 (8 bytes) to match Rust program's derive_position_bin_pda
+  // Rust: bin_index.to_le_bytes() produces 8 bytes from u64
+  // Must convert signed i32 to canonical u64 encoding (64-bit sign extension)
+  const binIndexU64 = binIndexToU64(binIndexI32);
+  const binIndexBuffer = Buffer.alloc(8);
+  binIndexBuffer.writeBigUInt64LE(binIndexU64, 0);
   return PublicKey.findProgramAddressSync(
     [
       Buffer.from("position_bin"),

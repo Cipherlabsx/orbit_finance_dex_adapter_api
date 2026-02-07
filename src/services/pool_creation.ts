@@ -644,7 +644,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Determine which bin arrays we need to create
   const binArraysNeeded = new Set<number>();
   for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
-    const arrayIndex = Math.floor(binIndex / BIN_ARRAY_SIZE);
+    // CRITICAL: Use Math.trunc to match Rust integer division (truncates toward zero)
+    const arrayIndex = Math.trunc(binIndex / BIN_ARRAY_SIZE);
     binArraysNeeded.add(arrayIndex * BIN_ARRAY_SIZE); // Store lower bin index of the array
   }
 

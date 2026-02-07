@@ -123,8 +123,8 @@ async function fetchPoolBins(
   const endBin = activeBin + radius;
 
   // Group into BinArray accounts (64 bins per array)
-  const startArray = Math.floor(startBin / 64) * 64;
-  const endArray = Math.floor(endBin / 64) * 64;
+  const startArray = Math.trunc(startBin / 64) * 64;
+  const endArray = Math.trunc(endBin / 64) * 64;
 
   for (let lowerIndex = startArray; lowerIndex <= endArray; lowerIndex += 64) {
     const binArrayPda = deriveBinArrayPda(poolPubkey, lowerIndex);

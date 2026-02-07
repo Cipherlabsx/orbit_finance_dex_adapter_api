@@ -2271,6 +2271,14 @@ export type OrbitFinance = {
           ]
         },
         {
+          "name": "feeWithdrawAuthority",
+          "docs": [
+            "SECURITY FIX: Authorized signer for fee withdrawals",
+            "Must match pool.fee_withdraw_authority"
+          ],
+          "signer": true
+        },
+        {
           "name": "protocolFeeVault",
           "docs": [
             "Protocol fee vault PDA (validated against pool.protocol_fee_vault)"
@@ -3350,93 +3358,103 @@ export type OrbitFinance = {
     },
     {
       "code": 6045,
+      "name": "activeBinWithdrawalForbidden",
+      "msg": "Withdrawals from the active bin are forbidden to prevent price manipulation."
+    },
+    {
+      "code": 6046,
       "name": "missingPositionBin",
       "msg": "Missing position bin account."
     },
     {
-      "code": 6046,
+      "code": 6047,
       "name": "positionPoolMismatch",
       "msg": "Position pool mismatch."
     },
     {
-      "code": 6047,
+      "code": 6048,
       "name": "positionOwnerMismatch",
       "msg": "Position owner mismatch."
     },
     {
-      "code": 6048,
+      "code": 6049,
       "name": "binPoolMismatch",
       "msg": "Bin pool mismatch."
     },
     {
-      "code": 6049,
+      "code": 6050,
       "name": "positionBinPositionMismatch",
       "msg": "PositionBin position mismatch."
     },
     {
-      "code": 6050,
+      "code": 6051,
       "name": "positionBinPoolMismatch",
       "msg": "PositionBin pool mismatch."
     },
     {
-      "code": 6051,
+      "code": 6052,
       "name": "accountingInvariantViolation",
       "msg": "Accounting invariant violated."
     },
     {
-      "code": 6052,
+      "code": 6053,
       "name": "insufficientPositionBinShares",
       "msg": "Insufficient position bin shares."
     },
     {
-      "code": 6053,
+      "code": 6054,
       "name": "accountingMismatch",
       "msg": "Accounting mismatch: bin deltas do not match vault payout. Pass all active bins in remaining_accounts."
     },
     {
-      "code": 6054,
+      "code": 6055,
       "name": "duplicateBinAccount",
       "msg": "Duplicate bin account provided."
     },
     {
-      "code": 6055,
+      "code": 6056,
       "name": "invalidMetadata",
       "msg": "NFT metadata is invalid or cannot be parsed."
     },
     {
-      "code": 6056,
+      "code": 6057,
       "name": "invalidNftRarity",
       "msg": "NFT rarity indicator not found or invalid in metadata name."
     },
     {
-      "code": 6057,
+      "code": 6058,
       "name": "insufficientOracleData",
       "msg": "Insufficient oracle data: not enough price observations recorded."
     },
     {
-      "code": 6058,
+      "code": 6059,
       "name": "invalidTimestamp",
       "msg": "Invalid timestamp for oracle observation."
     },
     {
-      "code": 6059,
+      "code": 6060,
       "name": "invalidOracleWindow",
       "msg": "Invalid oracle observation window."
     },
     {
-      "code": 6060,
+      "code": 6061,
       "name": "oraclePoolMismatch",
       "msg": "Oracle pool mismatch."
     },
     {
-      "code": 6061,
+      "code": 6062,
       "name": "invalidBinArrayPda",
       "msg": "Invalid BinArray PDA derivation."
     },
     {
-      "code": 6062,
+      "code": 6063,
       "name": "invalidPositionBinPda",
       "msg": "Invalid PositionBin PDA derivation."
+    },
+    {
+      "code": 6064,
+      "name": "claimTooSoon",
+      "msg": "Claim cooldown not elapsed. Please wait before claiming again."
     }
   ],
   "types": [

@@ -13,6 +13,159 @@ export type OrbitFinance = {
   },
   "instructions": [
     {
+      "name": "addLiquidityBatch",
+      "docs": [
+        "Adds liquidity to multiple bins with LAZY ACCOUNT CREATION.",
+        "",
+        "# Optimization vs add_liquidity_v2",
+        "Reduces pool creation from ~150 transactions to 2-7 transactions by:",
+        "- Lazy-creating BinArrays on-demand (no pre-coordination)",
+        "- Lazy-creating Position if first time (init_if_needed)",
+        "- Lazy-creating PositionBins on-demand",
+        "- Processing all bins atomically (all-or-nothing)",
+        "",
+        "# Process",
+        "1. Initialize Position if first time (init_if_needed)",
+        "2. Transfer total tokens to vaults",
+        "3. For each bin:",
+        "- Create BinArray if doesn't exist (lazy)",
+        "- Create PositionBin if doesn't exist (lazy)",
+        "- Calculate shares and update reserves",
+        "4. Validate vault reconciliation",
+        "",
+        "# Remaining Accounts Layout",
+        "[bin_array_0, position_bin_0, bin_array_1, position_bin_1, ...]",
+        "",
+        "# Limits",
+        "- Max 32 bins per transaction (due to transaction size limits)",
+        "- For pools with >32 bins, split into multiple batched calls",
+        "",
+        "# Security",
+        "- All bin indices must be canonically encoded",
+        "- No duplicate bin indices",
+        "- PDA validation prevents account substitution"
+      ],
+      "discriminator": [
+        254,
+        87,
+        215,
+        234,
+        0,
+        131,
+        76,
+        231
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool (zero-copy)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "position",
+          "docs": [
+            "Position PDA - created if doesn't exist (lazy initialization)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user",
+          "docs": [
+            "User (signs and pays for account creation)."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "userBase",
+          "docs": [
+            "User's base token account."
+          ],
+          "writable": true
+        },
+        {
+          "name": "userQuote",
+          "docs": [
+            "User's quote token account."
+          ],
+          "writable": true
+        },
+        {
+          "name": "baseVault",
+          "docs": [
+            "Pool's base vault."
+          ],
+          "writable": true
+        },
+        {
+          "name": "quoteVault",
+          "docs": [
+            "Pool's quote vault."
+          ],
+          "writable": true
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        },
+        {
+          "name": "deposits",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "binLiquidityDeposit"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "addLiquidityV2",
       "docs": [
         "Adds liquidity to multiple bins using BinArray architecture.",
@@ -464,7 +617,8 @@ export type OrbitFinance = {
           "name": "pool",
           "docs": [
             "Pool PDA (seeded from instruction args)",
-            "CRITICAL: Pool address includes bin_step_bps to support multiple pools per token pair"
+            "CRITICAL: Pool address includes BOTH bin_step_bps AND base_fee_bps to support multiple pools",
+            "per token pair with different fee tiers"
           ],
           "writable": true,
           "pda": {
@@ -489,6 +643,10 @@ export type OrbitFinance = {
               {
                 "kind": "arg",
                 "path": "binStepBps"
+              },
+              {
+                "kind": "arg",
+                "path": "baseFeeBps"
               }
             ]
           }
@@ -496,7 +654,7 @@ export type OrbitFinance = {
         {
           "name": "registry",
           "docs": [
-            "Registry PDA (close too so you can re-init same pool with same bin step)"
+            "Registry PDA (close too so you can re-init same pool with same configuration)"
           ],
           "writable": true,
           "pda": {
@@ -525,6 +683,10 @@ export type OrbitFinance = {
               {
                 "kind": "arg",
                 "path": "binStepBps"
+              },
+              {
+                "kind": "arg",
+                "path": "baseFeeBps"
               }
             ]
           }
@@ -547,6 +709,14 @@ export type OrbitFinance = {
         },
         {
           "name": "nftFeeVault",
+          "writable": true
+        },
+        {
+          "name": "protocolFeeVault",
+          "writable": true
+        },
+        {
+          "name": "lpMint",
           "writable": true
         },
         {
@@ -573,6 +743,10 @@ export type OrbitFinance = {
         },
         {
           "name": "binStepBps",
+          "type": "u16"
+        },
+        {
+          "name": "baseFeeBps",
           "type": "u16"
         }
       ]
@@ -819,6 +993,71 @@ export type OrbitFinance = {
       "args": []
     },
     {
+      "name": "initOracle",
+      "docs": [
+        "Initializes the Oracle account for price observation tracking.",
+        "Optional - pools can function without oracle, but oracle enables TWAP calculation",
+        "for external integrations (lending, perpetuals, price feeds)."
+      ],
+      "discriminator": [
+        78,
+        100,
+        33,
+        183,
+        96,
+        207,
+        60,
+        91
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool account (immutable)"
+          ]
+        },
+        {
+          "name": "oracle",
+          "docs": [
+            "Oracle PDA for this pool"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  114,
+                  97,
+                  99,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "docs": [
+            "Pool admin (authority that can initialize oracle)"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "initPool",
       "docs": [
         "Initializes a new liquidity pool (state + lp_mint + registry + vaults).",
@@ -863,9 +1102,10 @@ export type OrbitFinance = {
           "name": "pool",
           "docs": [
             "Pool state account (PDA), zero_copy for stack efficiency.",
-            "CRITICAL: Pool address includes bin_step_bps to allow multiple pools per token pair.",
-            "Each bin step represents a different price granularity, enabling traders to choose",
-            "between tighter spreads (lower bin steps) or wider ranges (higher bin steps)."
+            "CRITICAL: Pool address includes BOTH bin_step_bps AND base_fee_bps to allow multiple pools",
+            "per token pair with different fee tiers and price granularities.",
+            "This enables traders to choose between tighter spreads (lower bin steps) or wider ranges (higher bin steps),",
+            "AND choose between different fee tiers (e.g., 0.3% vs 0.4% base fees)."
           ],
           "writable": true,
           "pda": {
@@ -890,6 +1130,10 @@ export type OrbitFinance = {
               {
                 "kind": "arg",
                 "path": "binStepBps"
+              },
+              {
+                "kind": "arg",
+                "path": "fee_config.base_fee_bps"
               }
             ]
           }
@@ -1137,7 +1381,8 @@ export type OrbitFinance = {
           "name": "registry",
           "docs": [
             "Pair registry PDA to prevent duplicate pools.",
-            "CRITICAL: Includes bin_step_bps to allow multiple pools per token pair (one registry per pool)"
+            "CRITICAL: Includes BOTH bin_step_bps AND base_fee_bps to allow multiple pools per token pair",
+            "with different fee tiers (one registry per unique pool configuration)"
           ],
           "writable": true,
           "pda": {
@@ -1166,6 +1411,10 @@ export type OrbitFinance = {
               {
                 "kind": "arg",
                 "path": "binStepBps"
+              },
+              {
+                "kind": "arg",
+                "path": "fee_config.base_fee_bps"
               }
             ]
           }
@@ -1725,28 +1974,49 @@ export type OrbitFinance = {
       ]
     },
     {
-      "name": "swapV2",
+      "name": "swap",
       "docs": [
         "Executes a swap using BinArray architecture with accounting validation.",
+        "Unified swap instruction with support for both exact input and exact output modes.",
         "",
-        "# V2 Features",
+        "# Modes",
+        "- **ExactIn**: Specify exact input, get minimum output (most common)",
+        "- **ExactOut**: Specify exact output, spend maximum input (bills, bridges)",
+        "",
+        "# Features",
         "- Traverses bins across multiple BinArrays efficiently",
         "- Updates fee growth on each bin touched (auto-compounding)",
         "- Post-swap validation: sum(bin_reserves) == vault_balances",
-        "- Fails transaction if accounting drift detected",
+        "- Distributes fees to 6 vaults (protocol, creator, holders, NFT)",
+        "- Optional oracle observation recording (TWAP support)",
         "",
         "# Security",
-        "Stricter than legacy swap - fails loud on accounting errors."
+        "Strict accounting validation - fails loud on drift detection.",
+        "",
+        "# Examples",
+        "```rust",
+        "// Exact input (most common)",
+        "swap(ctx, SwapSpec::ExactIn {",
+        "amount_in: 1000000,",
+        "min_amount_out: 950000,",
+        "}, route)",
+        "",
+        "// Exact output (bills, bridges)",
+        "swap(ctx, SwapSpec::ExactOut {",
+        "amount_out: 1000000,",
+        "max_amount_in: 1100000,",
+        "}, route)",
+        "```"
       ],
       "discriminator": [
-        43,
-        4,
-        237,
-        11,
-        26,
-        201,
-        30,
-        98
+        248,
+        198,
+        158,
+        145,
+        225,
+        117,
+        135,
+        200
       ],
       "accounts": [
         {
@@ -1761,7 +2031,7 @@ export type OrbitFinance = {
           "name": "userSource",
           "docs": [
             "User's source token account (validated in function)",
-            "SECURITY FIX: Added ownership constraint"
+            "SECURITY: Added ownership constraint"
           ],
           "writable": true
         },
@@ -1769,7 +2039,7 @@ export type OrbitFinance = {
           "name": "userDestination",
           "docs": [
             "User's destination token account (validated in function)",
-            "SECURITY FIX: Added ownership constraint"
+            "SECURITY: Added ownership constraint"
           ],
           "writable": true
         },
@@ -1828,18 +2098,18 @@ export type OrbitFinance = {
       ],
       "args": [
         {
-          "name": "amountIn",
-          "type": "u64"
-        },
-        {
-          "name": "minAmountOut",
-          "type": "u64"
+          "name": "spec",
+          "type": {
+            "defined": {
+              "name": "swapSpec"
+            }
+          }
         },
         {
           "name": "route",
           "type": {
             "defined": {
-              "name": "swapRouteV2"
+              "name": "swapRoute"
             }
           }
         }
@@ -2300,7 +2570,7 @@ export type OrbitFinance = {
       }
     },
     {
-      "name": "withdrawV2",
+      "name": "withdraw",
       "docs": [
         "Withdraws liquidity from multiple bins with auto-compounded fee distribution.",
         "",
@@ -2311,19 +2581,40 @@ export type OrbitFinance = {
         "- Post-withdrawal accounting validation",
         "- Completeness check: all relevant bins must be included",
         "",
+        "Unified withdrawal instruction with support for both exact and range modes.",
+        "",
+        "# Modes",
+        "- **Exact**: Specify exact shares per bin (granular control)",
+        "- **Range**: Specify bin range + percentage (simple, user-friendly)",
+        "",
         "# Fee Distribution",
         "Fees are auto-compounded - withdrawal includes proportional share of all fees",
-        "earned since deposit. No separate claiming required."
+        "earned since deposit. No separate claiming required.",
+        "",
+        "# Examples",
+        "```rust",
+        "// Full withdrawal (range mode)",
+        "withdraw(ctx, WithdrawalSpec::Range { from_bin: -1000, to_bin: 1000, bps: 10000 })",
+        "",
+        "// Partial withdrawal (range mode)",
+        "withdraw(ctx, WithdrawalSpec::Range { from_bin: 100, to_bin: 110, bps: 5000 })",
+        "",
+        "// Granular control (exact mode)",
+        "withdraw(ctx, WithdrawalSpec::Exact { withdrawals: vec![",
+        "BinWithdrawal { bin_index: 50, shares: 1000 },",
+        "BinWithdrawal { bin_index: 51, shares: 2000 },",
+        "]})",
+        "```"
       ],
       "discriminator": [
-        242,
-        80,
-        163,
-        0,
-        196,
-        221,
-        194,
-        194
+        183,
+        18,
+        70,
+        156,
+        148,
+        109,
+        161,
+        34
       ],
       "accounts": [
         {
@@ -2370,6 +2661,34 @@ export type OrbitFinance = {
           "writable": true
         },
         {
+          "name": "protocolFeeVault",
+          "docs": [
+            "Protocol fee vault (for vault reconciliation)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "creatorFeeVault",
+          "docs": [
+            "Creator fee vault (for vault reconciliation)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "holdersFeeVault",
+          "docs": [
+            "Holders fee vault (for vault reconciliation)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "nftFeeVault",
+          "docs": [
+            "NFT fee vault (for vault reconciliation)."
+          ],
+          "writable": true
+        },
+        {
           "name": "position",
           "docs": [
             "Position PDA."
@@ -2409,16 +2728,18 @@ export type OrbitFinance = {
         {
           "name": "tokenProgram",
           "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
         {
-          "name": "withdrawals",
+          "name": "spec",
           "type": {
-            "vec": {
-              "defined": {
-                "name": "binWithdrawal"
-              }
+            "defined": {
+              "name": "withdrawalSpec"
             }
           }
         },
@@ -2484,6 +2805,19 @@ export type OrbitFinance = {
         146,
         35,
         130
+      ]
+    },
+    {
+      "name": "oracle",
+      "discriminator": [
+        139,
+        194,
+        131,
+        179,
+        140,
+        179,
+        229,
+        244
       ]
     },
     {
@@ -3011,63 +3345,98 @@ export type OrbitFinance = {
     },
     {
       "code": 6044,
+      "name": "activeBinDepositForbidden",
+      "msg": "Deposits into the active bin are forbidden to prevent price manipulation."
+    },
+    {
+      "code": 6045,
       "name": "missingPositionBin",
       "msg": "Missing position bin account."
     },
     {
-      "code": 6045,
+      "code": 6046,
       "name": "positionPoolMismatch",
       "msg": "Position pool mismatch."
     },
     {
-      "code": 6046,
+      "code": 6047,
       "name": "positionOwnerMismatch",
       "msg": "Position owner mismatch."
     },
     {
-      "code": 6047,
+      "code": 6048,
       "name": "binPoolMismatch",
       "msg": "Bin pool mismatch."
     },
     {
-      "code": 6048,
+      "code": 6049,
       "name": "positionBinPositionMismatch",
       "msg": "PositionBin position mismatch."
     },
     {
-      "code": 6049,
+      "code": 6050,
       "name": "positionBinPoolMismatch",
       "msg": "PositionBin pool mismatch."
     },
     {
-      "code": 6050,
+      "code": 6051,
       "name": "accountingInvariantViolation",
       "msg": "Accounting invariant violated."
     },
     {
-      "code": 6051,
+      "code": 6052,
       "name": "insufficientPositionBinShares",
       "msg": "Insufficient position bin shares."
     },
     {
-      "code": 6052,
+      "code": 6053,
       "name": "accountingMismatch",
       "msg": "Accounting mismatch: bin deltas do not match vault payout. Pass all active bins in remaining_accounts."
     },
     {
-      "code": 6053,
+      "code": 6054,
       "name": "duplicateBinAccount",
       "msg": "Duplicate bin account provided."
     },
     {
-      "code": 6054,
+      "code": 6055,
       "name": "invalidMetadata",
       "msg": "NFT metadata is invalid or cannot be parsed."
     },
     {
-      "code": 6055,
+      "code": 6056,
       "name": "invalidNftRarity",
       "msg": "NFT rarity indicator not found or invalid in metadata name."
+    },
+    {
+      "code": 6057,
+      "name": "insufficientOracleData",
+      "msg": "Insufficient oracle data: not enough price observations recorded."
+    },
+    {
+      "code": 6058,
+      "name": "invalidTimestamp",
+      "msg": "Invalid timestamp for oracle observation."
+    },
+    {
+      "code": 6059,
+      "name": "invalidOracleWindow",
+      "msg": "Invalid oracle observation window."
+    },
+    {
+      "code": 6060,
+      "name": "oraclePoolMismatch",
+      "msg": "Oracle pool mismatch."
+    },
+    {
+      "code": 6061,
+      "name": "invalidBinArrayPda",
+      "msg": "Invalid BinArray PDA derivation."
+    },
+    {
+      "code": 6062,
+      "name": "invalidPositionBinPda",
+      "msg": "Invalid PositionBin PDA derivation."
     }
   ],
   "types": [
@@ -3318,7 +3687,7 @@ export type OrbitFinance = {
     {
       "name": "binWithdrawal",
       "docs": [
-        "Per-bin withdrawal specification."
+        "Per-bin withdrawal specification for exact mode."
       ],
       "type": {
         "kind": "struct",
@@ -3333,7 +3702,7 @@ export type OrbitFinance = {
           {
             "name": "shares",
             "docs": [
-              "Shares to burn from this bin"
+              "Exact shares to burn from this bin"
             ],
             "type": "u128"
           }
@@ -4117,6 +4486,82 @@ export type OrbitFinance = {
       }
     },
     {
+      "name": "oracle",
+      "docs": [
+        "Oracle account for tracking price observations.",
+        "",
+        "Provides TWAP (Time-Weighted Average Price) calculation capability",
+        "for external protocol integrations (lending, perpetuals, etc.) and",
+        "MEV protection through price impact analysis.",
+        "",
+        "# Security Considerations",
+        "- Observations are immutable once written (no manipulation)",
+        "- Circular buffer prevents overflow",
+        "- Timestamps must be strictly increasing",
+        "- Only swap instructions can update observations"
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "docs": [
+              "Pool this oracle belongs to (32 bytes, align 1)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "activeIndex",
+            "docs": [
+              "Current active observation index (circular buffer)"
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "observationCount",
+            "docs": [
+              "Number of observations initialized (0 to MAX_OBSERVATIONS)"
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved bytes to align observations array to 8-byte boundary",
+              "(32 + 2 + 2 + 4 = 40 bytes, which is 8-byte aligned)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                4
+              ]
+            }
+          },
+          {
+            "name": "observations",
+            "docs": [
+              "Circular buffer of price observations",
+              "PriceObservation is 40 bytes (i64 + i128 + u128), needs 8-byte alignment"
+            ],
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "priceObservation"
+                  }
+                },
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "pairRegistered",
       "docs": [
         "Emitted if you keep a separate register_pair instruction (factory/registry path)."
@@ -4150,8 +4595,8 @@ export type OrbitFinance = {
     {
       "name": "pairRegistry",
       "docs": [
-        "Pair registry to prevent duplicate pools beyond canonical ordering.",
-        "PDA seeds: [b\"registry\", base_mint, quote_mint, bin_step_bps] (where base_mint < quote_mint)",
+        "Pair registry to prevent duplicate pools.",
+        "PDA seeds: [b\"registry\", base_mint, quote_mint, bin_step_bps]",
         "Each pool (unique base_mint + quote_mint + bin_step_bps combination) has its own registry."
       ],
       "type": {
@@ -4160,7 +4605,7 @@ export type OrbitFinance = {
           {
             "name": "baseMint",
             "docs": [
-              "Canonical pair (base < quote)"
+              "Token pair (can be in any order)"
             ],
             "type": "pubkey"
           },
@@ -4724,6 +5169,63 @@ export type OrbitFinance = {
       }
     },
     {
+      "name": "priceObservation",
+      "docs": [
+        "Single price observation at a specific timestamp.",
+        "",
+        "Stores cumulative values for TWAP calculation:",
+        "- Cumulative bin ID (sum of active_bin over time)",
+        "- Cumulative volatility (sum of volatility_accumulator over time)",
+        "",
+        "TWAP = (cumulative_end - cumulative_start) / (timestamp_end - timestamp_start)"
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "docs": [
+              "Unix timestamp of this observation"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "cumulativeBinIdLow",
+            "docs": [
+              "Cumulative sum of active bin ID (for TWAP price calculation) - low 64 bits",
+              "Full value = cumulative_bin_id_low | (cumulative_bin_id_high << 64)"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "cumulativeBinIdHigh",
+            "docs": [
+              "Cumulative sum of active bin ID - high 64 bits (signed)"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "cumulativeVolatilityLow",
+            "docs": [
+              "Cumulative sum of volatility accumulator (for volatility TWAP) - low 64 bits"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "cumulativeVolatilityHigh",
+            "docs": [
+              "Cumulative sum of volatility accumulator - high 64 bits"
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "rewardIndexes",
       "docs": [
         "Tracks accumulated reward indexes for holders and NFT stakers."
@@ -4799,10 +5301,9 @@ export type OrbitFinance = {
       }
     },
     {
-      "name": "swapRouteV2",
+      "name": "swapRoute",
       "docs": [
-        "Swap route specifying bin indices to traverse.",
-        "For BinArray architecture, bins can span multiple arrays."
+        "Swap route specifying bin indices to traverse."
       ],
       "type": {
         "kind": "struct",
@@ -4815,6 +5316,47 @@ export type OrbitFinance = {
             "type": {
               "vec": "i32"
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "swapSpec",
+      "docs": [
+        "Swap specification - supports both exact input and exact output modes.",
+        "",
+        "# Modes",
+        "- **ExactIn**: User specifies exact input amount, gets minimum output (most common)",
+        "- **ExactOut**: User specifies exact output amount, spends maximum input (bills, bridges)"
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "exactIn",
+            "fields": [
+              {
+                "name": "amountIn",
+                "type": "u64"
+              },
+              {
+                "name": "minAmountOut",
+                "type": "u64"
+              }
+            ]
+          },
+          {
+            "name": "exactOut",
+            "fields": [
+              {
+                "name": "amountOut",
+                "type": "u64"
+              },
+              {
+                "name": "maxAmountIn",
+                "type": "u64"
+              }
+            ]
           }
         ]
       }
@@ -5122,6 +5664,53 @@ export type OrbitFinance = {
                 7
               ]
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "withdrawalSpec",
+      "docs": [
+        "Withdrawal specification - supports both exact and range modes.",
+        "",
+        "# Modes",
+        "- **Exact**: Specify exact shares to burn per bin (granular control)",
+        "- **Range**: Specify bin range + percentage (simple, user-friendly)"
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "exact",
+            "fields": [
+              {
+                "name": "withdrawals",
+                "type": {
+                  "vec": {
+                    "defined": {
+                      "name": "binWithdrawal"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "name": "range",
+            "fields": [
+              {
+                "name": "fromBin",
+                "type": "i32"
+              },
+              {
+                "name": "toBin",
+                "type": "i32"
+              },
+              {
+                "name": "bpsToWithdraw",
+                "type": "u16"
+              }
+            ]
           }
         ]
       }

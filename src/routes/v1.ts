@@ -16,7 +16,7 @@ import { dbListPools, dbGetPool } from "../services/pool_db.js";
 import { dbListTokens, dbGetToken } from "../services/token_registry.js";
 import { getTokenPrice, getRelativePrice, getBatchPrices } from "../services/price_oracle.js";
 import { calculateHolderClaimable, calculateNftClaimable } from "../services/rewards.js";
-import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, type FeeConfig } from "../services/pool_creation.js";
+import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, buildPoolCreationBatchTransactions, type FeeConfig } from "../services/pool_creation.js";
 import { readPool } from "../services/pool_reader.js";
 import { upsertDexPool, supabase } from "../supabase.js";
 import { connection } from "../solana.js";
@@ -460,6 +460,132 @@ export async function v1Routes(app: FastifyInstance) {
       return {
         error: "internal_error",
         message: error instanceof Error ? error.message : "Failed to build pool creation transactions",
+        details: process.env.NODE_ENV === "development" ? errorMessage : undefined
+      };
+    }
+  });
+
+  // POST /api/v1/pool/create-batch -> Build pool creation with BATCHED liquidity
+  // OPTIMIZATION: Reduces ~150 transactions to 2-7 transactions using lazy account creation
+  app.post("/pool/create-batch", async (req, reply) => {
+    // Validator for Solana public keys (base58, 43-44 chars)
+    const publicKeyValidator = z.string().min(43).max(44).refine(
+      (str) => {
+        try {
+          new PublicKey(str);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: "Must be a valid Solana public key" }
+    );
+
+    const schema = z.object({
+      admin: publicKeyValidator,
+      creator: publicKeyValidator,
+      baseMint: publicKeyValidator,
+      quoteMint: publicKeyValidator,
+      lpMintPublicKey: publicKeyValidator,
+      binStepBps: z.number().int().refine((v) => [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400].includes(v), {
+        message: "binStepBps must be one of: 1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400",
+      }),
+      initialPrice: z.number().positive(),
+      feeConfig: z.object({
+        baseFeeBps: z.number().int().min(0).max(10000),
+        creatorCutBps: z.number().int().min(0).max(10000),
+        splitHoldersMicrobps: z.number().int().min(0).max(100000),
+        splitNftMicrobps: z.number().int().min(0).max(100000),
+        splitCreatorExtraMicrobps: z.number().int().min(0).max(100000),
+      }).refine(
+        (cfg) => cfg.splitHoldersMicrobps + cfg.splitNftMicrobps + cfg.splitCreatorExtraMicrobps === 100000,
+        { message: "Fee splits must sum to exactly 100,000 microbps" }
+      ),
+      accountingMode: z.number().int().min(0).max(1),
+      // Liquidity parameters (REQUIRED for batched endpoint)
+      baseAmount: z.string(),
+      quoteAmount: z.string(),
+      binsLeft: z.number().int().min(1),
+      binsRight: z.number().int().min(1),
+      settings: z.object({
+        priorityLevel: z.enum(["fast", "turbo", "ultra"]).optional(),
+      }).optional(),
+    });
+
+    try {
+      const body = schema.parse(req.body);
+
+      // Validate tokens exist in registry
+      const baseToken = await dbGetToken(body.baseMint);
+      const quoteToken = await dbGetToken(body.quoteMint);
+
+      if (!baseToken) {
+        reply.code(400);
+        return { error: "base_token_not_in_registry", mint: body.baseMint };
+      }
+      if (!quoteToken) {
+        reply.code(400);
+        return { error: "quote_token_not_in_registry", mint: body.quoteMint };
+      }
+
+      // Validate creator cut <= base fee
+      if (body.feeConfig.creatorCutBps > body.feeConfig.baseFeeBps) {
+        reply.code(400);
+        return {
+          error: "invalid_fee_config",
+          message: `creatorCutBps (${body.feeConfig.creatorCutBps}) cannot exceed baseFeeBps (${body.feeConfig.baseFeeBps})`,
+        };
+      }
+
+      // Build batched transactions (always includes liquidity for this endpoint)
+      const result = await buildPoolCreationBatchTransactions({
+        admin: body.admin,
+        creator: body.creator,
+        baseMint: body.baseMint,
+        quoteMint: body.quoteMint,
+        lpMintPublicKey: body.lpMintPublicKey,
+        binStepBps: body.binStepBps,
+        initialPrice: body.initialPrice,
+        baseDecimals: baseToken.decimals,
+        quoteDecimals: quoteToken.decimals,
+        feeConfig: body.feeConfig,
+        accountingMode: body.accountingMode,
+        baseAmount: body.baseAmount,
+        quoteAmount: body.quoteAmount,
+        binsLeft: body.binsLeft,
+        binsRight: body.binsRight,
+        priorityLevel: body.settings?.priorityLevel ?? "turbo",
+      }, connection);
+
+      reply.header("cache-control", "no-store");
+      return {
+        success: true,
+        ...result,
+        optimization: "batched",
+        transactionCount: result.transactions.length,
+        ts: Date.now(),
+      };
+    } catch (error) {
+      // Handle validation and business logic errors
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Check if it's a validation error
+      if (
+        errorMessage.includes("binStepBps must be") ||
+        errorMessage.includes("splits must sum") ||
+        errorMessage.includes("initialPrice must") ||
+        errorMessage.includes("Bin range")
+      ) {
+        reply.code(400);
+        return { error: "validation_failed", message: errorMessage };
+      }
+
+      // Unexpected error
+      console.error("Batched pool creation error:", error);
+      reply.code(500);
+      return {
+        error: "internal_error",
+        message: error instanceof Error ? error.message : "Failed to build batched pool creation transactions",
         details: process.env.NODE_ENV === "development" ? errorMessage : undefined
       };
     }

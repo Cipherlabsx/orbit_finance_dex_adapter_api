@@ -7,7 +7,7 @@
  * OPTIMIZATION: init_pool and init_pool_vaults merged into single instruction (saves 1 tx).
  *
  * Security:
- * - Allows any mint ordering (no canonical requirement - like Meteora)
+ * - Allows any mint ordering (no canonical requirement)
  * - Validates fee configuration (splits must sum to 100,000 microbps)
  * - Validates bin step against allowed values
  * - Only returns unsigned transactions (frontend signs)
@@ -58,7 +58,7 @@ export type PoolCreationParams = {
   baseMint: string;              // Base token mint
   quoteMint: string;             // Quote token mint
   lpMintPublicKey: string;       // SECURITY: Client-generated LP mint public key (frontend generates and signs)
-  binStepBps: number;            // Bin step in basis points (22 Meteora-standard values: 1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400)
+  binStepBps: number;            // Bin step in basis points (22 standard values: 1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400)
   initialPrice: number;          // Initial price as decimal (e.g., 6.35 for CIPHER/USDC)
   baseDecimals: number;          // Base token decimals
   quoteDecimals: number;         // Quote token decimals
@@ -206,21 +206,26 @@ function calculatePriceQ64_64(
 /**
  * Derive pool PDA (Program Derived Address)
  *
- * CRITICAL: Pool address includes bin_step_bps to allow multiple pools per token pair.
- * Each bin step represents a different liquidity distribution strategy:
- * - Lower bin steps (1-10 bps) = tighter price ranges, better for stable pairs
- * - Higher bin steps (50-400 bps) = wider price ranges, better for volatile pairs
+ * CRITICAL: Pool address includes BOTH bin_step_bps AND base_fee_bps to allow multiple pools
+ * per token pair with different configurations:
+ * - bin_step_bps: Price granularity (1-400 bps) - tighter spreads vs wider ranges
+ * - base_fee_bps: Swap fee tier (e.g., 5 = 0.05%, 30 = 0.30%, 100 = 1.00%)
  *
- * This enables the core DLMM design: traders choose pool granularity based on their needs.
+ * This enables multi-tier pools: same token pair can have multiple fee tiers
+ * (e.g., USDC/SOL with 0.05% fees for high volume, 0.30% fees for retail).
  *
  * @param baseMint - Base token mint address
  * @param quoteMint - Quote token mint address
  * @param binStepBps - Bin step in basis points (determines price granularity)
+ * @param baseFeeBps - Base swap fee in basis points (determines fee tier)
  * @returns Tuple of [pool PDA, bump seed]
  */
-function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number): [PublicKey, number] {
+function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number, baseFeeBps: number): [PublicKey, number] {
   const binStepBuffer = Buffer.alloc(2);
   binStepBuffer.writeUInt16LE(binStepBps);
+
+  const baseFeeBuffer = Buffer.alloc(2);
+  baseFeeBuffer.writeUInt16LE(baseFeeBps);
 
   return PublicKey.findProgramAddressSync(
     [
@@ -228,6 +233,7 @@ function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: nu
       baseMint.toBuffer(),
       quoteMint.toBuffer(),
       binStepBuffer,
+      baseFeeBuffer,
     ],
     PROGRAM_ID
   );
@@ -235,12 +241,16 @@ function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: nu
 
 /**
  * Derives registry PDA (prevents duplicate pools)
- * Seeds: ["registry", baseMint, quoteMint, binStepBps]
- * CRITICAL: Each pool (unique base + quote + bin step) has its own registry
+ * Seeds: ["registry", baseMint, quoteMint, binStepBps, baseFeeBps]
+ * CRITICAL: Each pool (unique base + quote + bin step + base fee) has its own registry
+ * Allows multiple pools per token pair with different fee tiers
  */
-function deriveRegistryPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number): [PublicKey, number] {
+function deriveRegistryPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number, baseFeeBps: number): [PublicKey, number] {
   const binStepBuf = Buffer.alloc(2);
   binStepBuf.writeUInt16LE(binStepBps, 0);
+
+  const baseFeeBuf = Buffer.alloc(2);
+  baseFeeBuf.writeUInt16LE(baseFeeBps, 0);
 
   return PublicKey.findProgramAddressSync(
     [
@@ -248,6 +258,7 @@ function deriveRegistryPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps
       baseMint.toBuffer(),
       quoteMint.toBuffer(),
       binStepBuf,
+      baseFeeBuf,
     ],
     PROGRAM_ID
   );
@@ -394,10 +405,11 @@ export async function buildPoolCreationTransactions(
   const initialPriceQ64_64 = calculatePriceQ64_64(initialPrice, baseDecimals, quoteDecimals);
 
   // Derive PDAs
-  // CRITICAL: Pool PDA includes bin_step_bps to enable multiple pools per token pair
-  const [poolPda] = derivePoolPda(baseMintPk, quoteMintPk, binStepBps);
-  // CRITICAL: Registry PDA also includes bin_step_bps (one registry per pool)
-  const [registryPda] = deriveRegistryPda(baseMintPk, quoteMintPk, binStepBps);
+  // CRITICAL: Pool PDA includes BOTH bin_step_bps AND base_fee_bps to enable multiple pools
+  // per token pair with different fee tiers
+  const [poolPda] = derivePoolPda(baseMintPk, quoteMintPk, binStepBps, feeConfig.baseFeeBps);
+  // CRITICAL: Registry PDA also includes BOTH bin_step_bps AND base_fee_bps (one registry per pool)
+  const [registryPda] = deriveRegistryPda(baseMintPk, quoteMintPk, binStepBps, feeConfig.baseFeeBps);
 
   // SECURITY: Use client-provided LP mint public key (keypair generated on client)
   const lpMintPk = new PublicKey(lpMintPublicKey);
@@ -531,7 +543,9 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   const coder = new BorshCoder(ORBIT_IDL);
   const priorityFeeMicroLamports = getPriorityFeeMicroLamports(priorityLevel);
-  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 });
+  // Increased from 1M to 1.4M to handle batched instructions (BinArrays, deposits)
+  // Wallet simulation needs headroom - 1M was causing simulation failures
+  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
   const computeUnitPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports });
 
   // Calculate active bin from initial price
@@ -579,10 +593,30 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // Check which bin arrays already exist on-chain (skip creating existing ones)
   const binArrayIndices = Array.from(binArraysNeeded).sort((a, b) => a - b);
   const binArrayPdas = binArrayIndices.map(lowerBinIdx => deriveBinArrayPda(poolPda, lowerBinIdx)[0]);
+
+  console.log(`[POOL_CREATION] Checking ${binArrayPdas.length} BinArray PDAs on-chain...`);
+  for (let i = 0; i < binArrayPdas.length; i++) {
+    console.log(`  BinArray ${i + 1}: ${binArrayPdas[i]!.toBase58()} (lower_bin_index: ${binArrayIndices[i]})`);
+  }
+
   const binArrayInfos = await connection.getMultipleAccountsInfo(binArrayPdas, "confirmed");
+
+  console.log(`[POOL_CREATION] RPC response for BinArrays:`);
+  for (let i = 0; i < binArrayInfos.length; i++) {
+    const exists = binArrayInfos[i] !== null;
+    console.log(`  BinArray ${i + 1}: ${exists ? 'EXISTS' : 'DOES NOT EXIST'} (${binArrayPdas[i]!.toBase58().slice(0, 8)}...)`);
+  }
 
   // Filter to only bin arrays that DON'T exist yet (saves 1-3 transactions)
   const binArrayIndicesToCreate = binArrayIndices.filter((_, idx) => !binArrayInfos[idx]);
+
+  console.log(`[POOL_CREATION] BinArray check:`);
+  console.log(`  - Total needed: ${binArrayIndices.length}`);
+  console.log(`  - Already exist: ${binArrayIndices.length - binArrayIndicesToCreate.length}`);
+  console.log(`  - To create: ${binArrayIndicesToCreate.length}`);
+  if (binArrayIndicesToCreate.length === 0 && binArrayIndices.length > 0) {
+    console.warn(`[POOL_CREATION] ⚠️  WARNING: All BinArrays reported as existing! This might be incorrect.`);
+  }
 
   // Build create_bin_array instructions and batch them
   // Each create_bin_array instruction is ~150 bytes
@@ -1031,16 +1065,16 @@ export async function buildPoolCreationWithLiquidityTransactions(
     const batchInstructions: SerializedInstruction[] = [];
 
     for (const binIndex of batchBinIndices) {
-      // Derive position_bin PDA
-      const binIndexBuffer = Buffer.alloc(8);
-      binIndexBuffer.writeBigUInt64LE(binIndexToU64(binIndex));
+      // SECURITY FIX: Derive position_bin PDA using i32 (4 bytes), not u64 (8 bytes)
+      const binIndexBuffer = Buffer.alloc(4);
+      binIndexBuffer.writeInt32LE(binIndex);
       const [positionBinPda] = PublicKey.findProgramAddressSync(
         [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
         PROGRAM_ID
       );
 
       // Encode init_position_bin instruction
-      // CRITICAL: Convert negative bin indices to u64 for instruction data
+      // NOTE: Instruction data still uses u64 as per IDL, but PDA uses i32
       const binIndexU64 = binIndexToU64(binIndex);
       const initPositionBinData = coder.instruction.encode("init_position_bin", {
         bin_index: new BN(binIndexU64.toString()),
@@ -1193,10 +1227,10 @@ export async function buildPoolCreationWithLiquidityTransactions(
       const lowerBinIndex = Math.floor(deposit.bin_index / 64) * 64; // 64 bins per array (BIN_ARRAY_SIZE)
       const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIndex);
 
-      // Derive position_bin PDA
-      // Seeds: ["position_bin", position_key, bin_index (u64 LE)]
-      const binIndexBuffer = Buffer.alloc(8);
-      binIndexBuffer.writeBigUInt64LE(binIndexToU64(deposit.bin_index));
+      // SECURITY FIX: Derive position_bin PDA using i32 (4 bytes), not u64 (8 bytes)
+      // Seeds: ["position_bin", position_key, bin_index (i32 LE)]
+      const binIndexBuffer = Buffer.alloc(4);
+      binIndexBuffer.writeInt32LE(deposit.bin_index);
       const [positionBinPda] = PublicKey.findProgramAddressSync(
         [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
         PROGRAM_ID
@@ -1276,6 +1310,17 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   allTransactions.push(...initPositionBinTransactions);
   allTransactions.push(...addLiquidityTransactions);
+
+  // Log final transaction summary
+  const txTypeCounts: Record<string, number> = {};
+  for (const tx of allTransactions) {
+    txTypeCounts[tx.type] = (txTypeCounts[tx.type] || 0) + 1;
+  }
+  console.log(`[POOL_CREATION] Final transaction summary:`);
+  console.log(`  Total transactions: ${allTransactions.length}`);
+  for (const [type, count] of Object.entries(txTypeCounts)) {
+    console.log(`  - ${type}: ${count}`);
+  }
 
   return {
     ...baseResult,
@@ -1366,3 +1411,306 @@ function priceToActiveBin(priceQ64_64: bigint, binStepBps: number): number {
 
   return activeBin;
 }
+
+/**
+ * Builds pool creation with BATCHED liquidity addition (optimized lazy account creation)
+ *
+ * OPTIMIZATION: Reduces ~150 transactions to 2-7 transactions using lazy account creation.
+ *
+ * Returns 2 transactions (or 2-7 if >32 bins):
+ * 1. init_pool: Creates pool state, LP mint, registry, and all 6 token vaults
+ * 2. add_liquidity_batch: Lazily creates BinArrays, Position, PositionBins, and adds liquidity atomically
+ *
+ * # Key Differences from buildPoolCreationWithLiquidityTransactions:
+ * - NO separate create_bin_arrays transactions (lazy creation during add_liquidity_batch)
+ * - NO separate init_position transaction (init_if_needed pattern)
+ * - NO separate init_position_bins transactions (lazy creation during add_liquidity_batch)
+ * - Single add_liquidity_batch instruction handles ALL account creation + liquidity deposit
+ *
+ * # Benefits:
+ * - 98% fewer transactions (150 → 2-7)
+ * - Atomic operation (all-or-nothing)
+ * - Much better UX (less signing)
+ * - Lower gas costs
+ * - Competitive transaction efficiency
+ *
+ * # Limits:
+ * - Max 32 bins per add_liquidity_batch transaction (transaction size limit)
+ * - For >32 bins, automatically splits into multiple batches (2-7 transactions total)
+ *
+ * @param params - Pool creation parameters with liquidity distribution
+ * @param connection - Solana RPC connection
+ * @returns Pool creation result with init_pool + add_liquidity_batch transactions
+ */
+export async function buildPoolCreationBatchTransactions(
+  params: PoolCreationWithLiquidityParams,
+  connection: Connection
+): Promise<PoolCreationResult> {
+  console.log("=".repeat(80));
+  console.log("[POOL_CREATION_BATCH] *** BATCHED LIQUIDITY FLOW ***");
+  console.log(`[POOL_CREATION_BATCH] Admin: ${params.admin}`);
+  console.log(`[POOL_CREATION_BATCH] Base: ${params.baseMint}`);
+  console.log(`[POOL_CREATION_BATCH] Quote: ${params.quoteMint}`);
+  console.log(`[POOL_CREATION_BATCH] Bin step: ${params.binStepBps} bps`);
+  console.log("=".repeat(80));
+
+  const {
+    admin,
+    baseMint,
+    quoteMint,
+    binStepBps,
+    initialPrice,
+    baseDecimals,
+    quoteDecimals,
+    baseAmount,
+    quoteAmount,
+    binsLeft,
+    binsRight,
+    priorityLevel = "turbo",
+  } = params;
+
+  // 1. Build init_pool transaction (same as regular flow)
+  const baseResult = await buildPoolCreationTransactions(params);
+
+  const adminPk = new PublicKey(admin);
+  const baseMintPk = new PublicKey(baseMint);
+  const quoteMintPk = new PublicKey(quoteMint);
+  const poolPda = new PublicKey(baseResult.poolAddress);
+
+  const coder = new BorshCoder(ORBIT_IDL);
+  const priorityFeeMicroLamports = getPriorityFeeMicroLamports(priorityLevel);
+  const computeUnitLimitIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
+  const computeUnitPriceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports });
+
+  // Calculate bin range
+  const priceQ64_64 = calculatePriceQ64_64(initialPrice, baseDecimals, quoteDecimals);
+  const activeBin = priceToActiveBin(priceQ64_64, binStepBps);
+  const lowerBinIndex = activeBin - binsLeft;
+  const upperBinIndex = activeBin + binsRight;
+
+  // Validate bin range
+  if (lowerBinIndex < -2147483648 || upperBinIndex > 2147483647) {
+    throw new Error(
+      `Bin range [${lowerBinIndex}, ${upperBinIndex}] exceeds i32 bounds. ` +
+      `Reduce binsLeft (${binsLeft}) or binsRight (${binsRight}).`
+    );
+  }
+
+  const totalBins = upperBinIndex - lowerBinIndex + 1;
+  const MAX_BINS_PER_POOL = 1000;
+  if (totalBins > MAX_BINS_PER_POOL) {
+    throw new Error(
+      `Bin range too large: ${totalBins} bins. Maximum: ${MAX_BINS_PER_POOL}. ` +
+      `Reduce binsLeft or binsRight.`
+    );
+  }
+
+  console.log(`[POOL_CREATION_BATCH] Bin range: ${lowerBinIndex} to ${upperBinIndex} (${totalBins} bins)`);
+  console.log(`[POOL_CREATION_BATCH] Active bin: ${activeBin}`);
+
+  // Convert amounts to raw (atoms)
+  const baseAmountRaw = BigInt(Math.floor(parseFloat(baseAmount) * 10 ** baseDecimals));
+  const quoteAmountRaw = BigInt(Math.floor(parseFloat(quoteAmount) * 10 ** quoteDecimals));
+
+  // Build deposits array - distribute evenly across bins
+  const depositsRaw: Array<{ bin_index: number; base_in: bigint; quote_in: bigint; min_shares_out: bigint }> = [];
+
+  const binsWithBase = activeBin - lowerBinIndex + 1;
+  const binsWithQuote = upperBinIndex - activeBin + 1;
+
+  // Calculate per-bin shares and remainders
+  const baseShare = binsWithBase > 0 ? baseAmountRaw / BigInt(binsWithBase) : 0n;
+  const quoteShare = binsWithQuote > 0 ? quoteAmountRaw / BigInt(binsWithQuote) : 0n;
+  const baseRemainder = binsWithBase > 0 ? baseAmountRaw % BigInt(binsWithBase) : 0n;
+  const quoteRemainder = binsWithQuote > 0 ? quoteAmountRaw % BigInt(binsWithQuote) : 0n;
+
+  console.log(`[POOL_CREATION_BATCH] Liquidity distribution:`);
+  console.log(`  Total bins: ${totalBins}`);
+  console.log(`  Bins with base: ${binsWithBase} (≤ active)`);
+  console.log(`  Bins with quote: ${binsWithQuote} (≥ active)`);
+  console.log(`  Base: ${baseAmountRaw} atoms = ${baseShare}/bin + ${baseRemainder} remainder`);
+  console.log(`  Quote: ${quoteAmountRaw} atoms = ${quoteShare}/bin + ${quoteRemainder} remainder`);
+
+  // Distribute liquidity
+  let baseCounter = 0;
+  let quoteCounter = 0;
+
+  for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
+    let binBaseAmount = 0n;
+    let binQuoteAmount = 0n;
+
+    // Distribute base to bins <= activeBin
+    if (binIndex <= activeBin && baseShare > 0n) {
+      binBaseAmount = baseShare;
+      if (baseCounter < Number(baseRemainder)) {
+        binBaseAmount += 1n;
+      }
+      baseCounter++;
+    }
+
+    // Distribute quote to bins >= activeBin
+    if (binIndex >= activeBin && quoteShare > 0n) {
+      binQuoteAmount = quoteShare;
+      if (quoteCounter < Number(quoteRemainder)) {
+        binQuoteAmount += 1n;
+      }
+      quoteCounter++;
+    }
+
+    if (binBaseAmount > 0n || binQuoteAmount > 0n) {
+      depositsRaw.push({
+        bin_index: binIndex,
+        base_in: binBaseAmount,
+        quote_in: binQuoteAmount,
+        min_shares_out: 0n, // No slippage protection for pool creation (bootstrap)
+      });
+    }
+  }
+
+  // Verify distribution
+  const totalBaseDistributed = depositsRaw.reduce((sum, d) => sum + d.base_in, 0n);
+  const totalQuoteDistributed = depositsRaw.reduce((sum, d) => sum + d.quote_in, 0n);
+
+  if (totalBaseDistributed !== baseAmountRaw || totalQuoteDistributed !== quoteAmountRaw) {
+    throw new Error(
+      `Distribution mismatch! Base: ${totalBaseDistributed}/${baseAmountRaw}, Quote: ${totalQuoteDistributed}/${quoteAmountRaw}`
+    );
+  }
+
+  console.log(`[POOL_CREATION_BATCH] ✓ Distribution verified: ${depositsRaw.length} deposits`);
+
+  // Derive accounts
+  const positionNonce = BigInt(0);
+  const [positionPda] = derivePositionPda(poolPda, adminPk, positionNonce);
+  const [baseVaultPda] = deriveVaultPda(poolPda, "base");
+  const [quoteVaultPda] = deriveVaultPda(poolPda, "quote");
+
+  const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+  const [ownerBaseAta] = PublicKey.findProgramAddressSync(
+    [adminPk.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), baseMintPk.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+
+  const [ownerQuoteAta] = PublicKey.findProgramAddressSync(
+    [adminPk.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), quoteMintPk.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+
+  // Build add_liquidity_batch transactions
+  // Max 15 bins per transaction (transaction size limit ~1232 bytes)
+  // Each bin needs: BinArray (32 bytes) + PositionBin (32 bytes) = 64 bytes
+  // 15 bins = 960 bytes for remaining accounts + ~272 bytes for instruction = ~1232 bytes total
+  const MAX_BINS_PER_BATCH = 15;
+  const batchedDeposits: Array<typeof depositsRaw> = [];
+
+  for (let i = 0; i < depositsRaw.length; i += MAX_BINS_PER_BATCH) {
+    batchedDeposits.push(depositsRaw.slice(i, i + MAX_BINS_PER_BATCH));
+  }
+
+  console.log(`[POOL_CREATION_BATCH] Splitting into ${batchedDeposits.length} batches (${MAX_BINS_PER_BATCH} bins max per batch)`);
+
+  const addLiquidityBatchTransactions: Array<{ type: "add_liquidity"; instructions: SerializedInstruction[] }> = [];
+
+  for (let batchIdx = 0; batchIdx < batchedDeposits.length; batchIdx++) {
+    const batchDeposits = batchedDeposits[batchIdx]!;
+
+    // Build remaining accounts: [binArray0, positionBin0, binArray1, positionBin1, ...]
+    const remainingAccounts: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }> = [];
+
+    for (const deposit of batchDeposits) {
+      const binIndexI32 = deposit.bin_index;
+      const lowerBinIdx = Math.floor(binIndexI32 / 64) * 64;
+
+      const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIdx);
+      // SECURITY FIX: Pass i32 directly for PDA derivation (not u64)
+      const [positionBinPda] = derivePositionBinPda(positionPda, binIndexI32);
+
+      remainingAccounts.push({ pubkey: binArrayPda, isSigner: false, isWritable: true });
+      remainingAccounts.push({ pubkey: positionBinPda, isSigner: false, isWritable: true });
+    }
+
+    // Encode deposits for IDL
+    const depositsEncoded = batchDeposits.map(d => ({
+      bin_index: binIndexToU64(d.bin_index),
+      base_in: new BN(d.base_in.toString()),
+      quote_in: new BN(d.quote_in.toString()),
+      min_shares_out: new BN(d.min_shares_out.toString()),
+    }));
+
+    // Build add_liquidity_batch instruction
+    const data = coder.instruction.encode("add_liquidity_batch", {
+      nonce: new BN(positionNonce.toString()),
+      deposits: depositsEncoded,
+    });
+
+    const addLiquidityBatchIx = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: poolPda, isSigner: false, isWritable: true },
+        { pubkey: positionPda, isSigner: false, isWritable: true },
+        { pubkey: adminPk, isSigner: true, isWritable: true },
+        { pubkey: ownerBaseAta, isSigner: false, isWritable: true },
+        { pubkey: ownerQuoteAta, isSigner: false, isWritable: true },
+        { pubkey: baseVaultPda, isSigner: false, isWritable: true },
+        { pubkey: quoteVaultPda, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+        ...remainingAccounts,
+      ],
+      data,
+    });
+
+    const memoIx = createMemoInstruction(
+      `Adding Liquidity (Batched) ${batchIdx + 1}/${batchedDeposits.length} | Bins: ${batchDeposits.length}`
+    );
+
+    addLiquidityBatchTransactions.push({
+      type: "add_liquidity",
+      instructions: [
+        serializeInstruction(computeUnitLimitIx),
+        serializeInstruction(computeUnitPriceIx),
+        serializeInstruction(memoIx),
+        serializeInstruction(addLiquidityBatchIx),
+      ],
+    });
+  }
+
+  console.log(`[POOL_CREATION_BATCH] ✓ Built ${1 + addLiquidityBatchTransactions.length} transactions total`);
+  console.log(`  1. init_pool (creates pool + 6 vaults)`);
+  console.log(`  2-${1 + addLiquidityBatchTransactions.length}. add_liquidity_batch (lazy creates everything + deposits liquidity)`);
+
+  return {
+    transactions: [
+      ...baseResult.transactions,
+      ...addLiquidityBatchTransactions,
+    ],
+    poolAddress: baseResult.poolAddress,
+    lpMintPublicKey: baseResult.lpMintPublicKey,
+    registryAddress: baseResult.registryAddress,
+    positionAddress: positionPda.toBase58(),
+  };
+}
+
+/**
+ * Derives position bin PDA
+ * SECURITY: Seeds use i32 (4 bytes), not u64 (8 bytes)
+ * Seeds: ["position_bin", position, bin_index (i32, little-endian)]
+ */
+function derivePositionBinPda(position: PublicKey, binIndexI32: number): [PublicKey, number] {
+  // SECURITY FIX: Use i32 (4 bytes) to match Rust program PDA derivation
+  // Previous version used u64 (8 bytes) which caused PDA mismatches
+  const binIndexBuffer = Buffer.alloc(4);
+  binIndexBuffer.writeInt32LE(binIndexI32, 0);
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("position_bin"),
+      position.toBuffer(),
+      binIndexBuffer,
+    ],
+    PROGRAM_ID
+  );
+}
+
+const SYSVAR_RENT_PUBKEY = new PublicKey("SysvarRent111111111111111111111111111111111");

@@ -20,6 +20,12 @@ import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactio
 import { readPool } from "../services/pool_reader.js";
 import { upsertDexPool, supabase } from "../supabase.js";
 import { connection } from "../solana.js";
+import {
+  CreatePoolBatchRequestZ,
+  CreatePoolRequestZ,
+  PoolRegisterRequestZ,
+  validateRequest,
+} from "../schemas/pool_creation.js";
 
 /**
  * Small helper: choose pool set.
@@ -327,52 +333,21 @@ export async function v1Routes(app: FastifyInstance) {
 
   // POST /api/v1/pool/create -> Build pool creation transactions
   app.post("/pool/create", async (req, reply) => {
-    // Validator for Solana public keys (base58, 43-44 chars)
-    const publicKeyValidator = z.string().min(43).max(44).refine(
-      (str) => {
-        try {
-          new PublicKey(str);
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      { message: "Must be a valid Solana public key" }
-    );
+    // SECURITY: Validate request body using centralized Zod schema
+    const validation = validateRequest(CreatePoolRequestZ, req.body);
 
-    const schema = z.object({
-      admin: publicKeyValidator,
-      creator: publicKeyValidator,
-      baseMint: publicKeyValidator,
-      quoteMint: publicKeyValidator,
-      lpMintPublicKey: publicKeyValidator, // SECURITY: Client-generated, only public key
-      binStepBps: z.number().int().refine((v) => [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400].includes(v), {
-        message: "binStepBps must be one of: 1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400",
-      }),
-      initialPrice: z.number().positive(),
-      feeConfig: z.object({
-        baseFeeBps: z.number().int().min(0).max(10000),
-        creatorCutBps: z.number().int().min(0).max(10000),
-        splitHoldersMicrobps: z.number().int().min(0).max(100000),
-        splitNftMicrobps: z.number().int().min(0).max(100000),
-        splitCreatorExtraMicrobps: z.number().int().min(0).max(100000),
-      }).refine(
-        (cfg) => cfg.splitHoldersMicrobps + cfg.splitNftMicrobps + cfg.splitCreatorExtraMicrobps === 100000,
-        { message: "Fee splits must sum to exactly 100,000 microbps" }
-      ),
-      accountingMode: z.number().int().min(0).max(1),
-      // Liquidity parameters (optional - if not provided, creates empty pool)
-      baseAmount: z.string().optional(),
-      quoteAmount: z.string().optional(),
-      binsLeft: z.number().int().min(1).optional(),
-      binsRight: z.number().int().min(1).optional(),
-      settings: z.object({
-        priorityLevel: z.enum(["fast", "turbo", "ultra"]).optional(),
-      }).optional(),
-    });
+    if (!validation.success) {
+      reply.code(400);
+      return {
+        error: "validation_failed",
+        message: "Request validation failed",
+        errors: validation.errors,
+      };
+    }
+
+    const body = validation.data;
 
     try {
-      const body = schema.parse(req.body);
 
       // Validate tokens exist in registry
       const baseToken = await dbGetToken(body.baseMint);
@@ -468,52 +443,21 @@ export async function v1Routes(app: FastifyInstance) {
   // POST /api/v1/pool/create-batch -> Build pool creation with BATCHED liquidity
   // OPTIMIZATION: Reduces ~150 transactions to 2-7 transactions using lazy account creation
   app.post("/pool/create-batch", async (req, reply) => {
-    // Validator for Solana public keys (base58, 43-44 chars)
-    const publicKeyValidator = z.string().min(43).max(44).refine(
-      (str) => {
-        try {
-          new PublicKey(str);
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      { message: "Must be a valid Solana public key" }
-    );
+    // SECURITY: Validate request body using centralized Zod schema
+    const validation = validateRequest(CreatePoolBatchRequestZ, req.body);
 
-    const schema = z.object({
-      admin: publicKeyValidator,
-      creator: publicKeyValidator,
-      baseMint: publicKeyValidator,
-      quoteMint: publicKeyValidator,
-      lpMintPublicKey: publicKeyValidator,
-      binStepBps: z.number().int().refine((v) => [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400].includes(v), {
-        message: "binStepBps must be one of: 1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400",
-      }),
-      initialPrice: z.number().positive(),
-      feeConfig: z.object({
-        baseFeeBps: z.number().int().min(0).max(10000),
-        creatorCutBps: z.number().int().min(0).max(10000),
-        splitHoldersMicrobps: z.number().int().min(0).max(100000),
-        splitNftMicrobps: z.number().int().min(0).max(100000),
-        splitCreatorExtraMicrobps: z.number().int().min(0).max(100000),
-      }).refine(
-        (cfg) => cfg.splitHoldersMicrobps + cfg.splitNftMicrobps + cfg.splitCreatorExtraMicrobps === 100000,
-        { message: "Fee splits must sum to exactly 100,000 microbps" }
-      ),
-      accountingMode: z.number().int().min(0).max(1),
-      // Liquidity parameters (REQUIRED for batched endpoint)
-      baseAmount: z.string(),
-      quoteAmount: z.string(),
-      binsLeft: z.number().int().min(1),
-      binsRight: z.number().int().min(1),
-      settings: z.object({
-        priorityLevel: z.enum(["fast", "turbo", "ultra"]).optional(),
-      }).optional(),
-    });
+    if (!validation.success) {
+      reply.code(400);
+      return {
+        error: "validation_failed",
+        message: "Request validation failed",
+        errors: validation.errors,
+      };
+    }
+
+    const body = validation.data;
 
     try {
-      const body = schema.parse(req.body);
 
       // Validate tokens exist in registry
       const baseToken = await dbGetToken(body.baseMint);
@@ -593,13 +537,21 @@ export async function v1Routes(app: FastifyInstance) {
 
   // POST /api/v1/pool/register -> Register newly created pool in database
   app.post("/pool/register", async (req, reply) => {
-    const schema = z.object({
-      poolAddress: z.string().length(44),
-      signature: z.string().min(64), // Transaction signature as proof
-    });
+    // SECURITY: Validate request body using centralized Zod schema
+    const validation = validateRequest(PoolRegisterRequestZ, req.body);
+
+    if (!validation.success) {
+      reply.code(400);
+      return {
+        error: "validation_failed",
+        message: "Request validation failed",
+        errors: validation.errors,
+      };
+    }
+
+    const body = validation.data;
 
     try {
-      const body = schema.parse(req.body);
 
       // Fetch pool account from chain to verify it exists and get metadata
       let poolData;

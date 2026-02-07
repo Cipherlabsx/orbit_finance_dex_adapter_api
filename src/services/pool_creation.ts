@@ -187,12 +187,27 @@ function calculatePriceQ64_64(
   baseDecimals: number,
   quoteDecimals: number
 ): bigint {
-  if (price <= 0) {
-    throw new Error(`initialPrice must be positive, got ${price}`);
+  // SECURITY FIX: Validate price is finite to prevent RangeError crash
+  // BigInt(Infinity) throws RangeError which crashes the server
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(`initialPrice must be a positive finite number, got ${price}`);
+  }
+
+  // SECURITY FIX: Validate decimals are in safe range (0-18)
+  // Prevents 10^309 = Infinity which would cause calculation failure
+  if (baseDecimals < 0 || baseDecimals > 18 || quoteDecimals < 0 || quoteDecimals > 18) {
+    throw new Error(`Decimals must be 0-18, got base=${baseDecimals}, quote=${quoteDecimals}`);
   }
 
   // Convert price to atoms (smallest units)
-  const quoteAtoms = BigInt(Math.floor(price * 10 ** quoteDecimals));
+  const scaledPrice = price * 10 ** quoteDecimals;
+
+  // SECURITY FIX: Verify scaled price is still finite before BigInt conversion
+  if (!Number.isFinite(scaledPrice)) {
+    throw new Error(`Price ${price} too large for ${quoteDecimals} decimals (result: ${scaledPrice})`);
+  }
+
+  const quoteAtoms = BigInt(Math.floor(scaledPrice));
   const baseAtoms = BigInt(10 ** baseDecimals);
 
   // Q64.64 = (quoteAtoms << 64) / baseAtoms
@@ -221,6 +236,15 @@ function calculatePriceQ64_64(
  * @returns Tuple of [pool PDA, bump seed]
  */
 function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number, baseFeeBps: number): [PublicKey, number] {
+  // SECURITY FIX: Validate inputs fit in u16 (0-65535) before writing to buffer
+  // writeUInt16LE silently truncates if value > 65535, causing wrong PDA derivation
+  if (binStepBps < 0 || binStepBps > 65535 || !Number.isInteger(binStepBps)) {
+    throw new Error(`binStepBps must be an integer in range 0-65535, got ${binStepBps}`);
+  }
+  if (baseFeeBps < 0 || baseFeeBps > 65535 || !Number.isInteger(baseFeeBps)) {
+    throw new Error(`baseFeeBps must be an integer in range 0-65535, got ${baseFeeBps}`);
+  }
+
   const binStepBuffer = Buffer.alloc(2);
   binStepBuffer.writeUInt16LE(binStepBps);
 
@@ -246,6 +270,14 @@ function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: nu
  * Allows multiple pools per token pair with different fee tiers
  */
 function deriveRegistryPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number, baseFeeBps: number): [PublicKey, number] {
+  // SECURITY FIX: Validate inputs fit in u16 (0-65535) before writing to buffer
+  if (binStepBps < 0 || binStepBps > 65535 || !Number.isInteger(binStepBps)) {
+    throw new Error(`binStepBps must be an integer in range 0-65535, got ${binStepBps}`);
+  }
+  if (baseFeeBps < 0 || baseFeeBps > 65535 || !Number.isInteger(baseFeeBps)) {
+    throw new Error(`baseFeeBps must be an integer in range 0-65535, got ${baseFeeBps}`);
+  }
+
   const binStepBuf = Buffer.alloc(2);
   binStepBuf.writeUInt16LE(binStepBps, 0);
 
@@ -397,8 +429,10 @@ export async function buildPoolCreationTransactions(
   validateBinStep(binStepBps);
   validateFeeConfig(feeConfig);
 
-  if (accountingMode < 0 || accountingMode > 1) {
-    throw new Error(`accountingMode must be 0 or 1, got ${accountingMode}`);
+  // SECURITY FIX: Only BinArray mode (1) is supported, enforce strictly
+  // Mode 0 may be for legacy/testing purposes and should not be used in production
+  if (accountingMode !== 1) {
+    throw new Error(`accountingMode must be 1 (BinArray), got ${accountingMode}`);
   }
 
   // Calculate Q64.64 price
@@ -557,11 +591,35 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   // Calculate bin range based on strategy
   // NOTE: This creates (binsLeft + 1 + binsRight) total bins, including active bin
+  // SECURITY FIX: Validate inputs BEFORE arithmetic to prevent integer overflow
+  // If activeBin is near i32::MAX, then activeBin + binsRight could overflow
+  if (binsLeft < 0 || binsRight < 0) {
+    throw new Error(`Bin counts cannot be negative: binsLeft=${binsLeft}, binsRight=${binsRight}`);
+  }
+
+  // SECURITY FIX: Check arithmetic won't overflow i32 bounds BEFORE performing it
+  // Use subtraction/addition in the check itself to detect overflow
+  const MIN_I32 = -2147483648;
+  const MAX_I32 = 2147483647;
+
+  if (activeBin - binsLeft < MIN_I32) {
+    throw new Error(
+      `Lower bin index would underflow i32: activeBin=${activeBin}, binsLeft=${binsLeft}. ` +
+      `Result would be < ${MIN_I32}. Reduce binsLeft.`
+    );
+  }
+  if (activeBin + binsRight > MAX_I32) {
+    throw new Error(
+      `Upper bin index would overflow i32: activeBin=${activeBin}, binsRight=${binsRight}. ` +
+      `Result would be > ${MAX_I32}. Reduce binsRight.`
+    );
+  }
+
   const lowerBinIndex = activeBin - binsLeft;
   const upperBinIndex = activeBin + binsRight;
 
-  // Validate bin range is within i32 bounds
-  if (lowerBinIndex < -2147483648 || upperBinIndex > 2147483647) {
+  // Additional validation: verify final range is within i32 bounds (redundant but safe)
+  if (lowerBinIndex < MIN_I32 || upperBinIndex > MAX_I32) {
     throw new Error(
       `Bin range [${lowerBinIndex}, ${upperBinIndex}] exceeds i32 bounds (-2147483648 to 2147483647). ` +
       `activeBin=${activeBin}, binsLeft=${binsLeft}, binsRight=${binsRight}. ` +
@@ -709,8 +767,39 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const [quoteVaultPda] = deriveVaultPda(poolPda, "quote");
 
   // Convert amounts to raw (atoms)
-  const baseAmountRaw = BigInt(Math.floor(parseFloat(baseAmount) * 10 ** baseDecimals));
-  const quoteAmountRaw = BigInt(Math.floor(parseFloat(quoteAmount) * 10 ** quoteDecimals));
+  // SECURITY FIX: Validate amounts are finite before BigInt conversion to prevent RangeError crash
+  // parseFloat("1e308") * 10^6 = Infinity → BigInt(Infinity) throws RangeError
+  const baseFloat = parseFloat(baseAmount);
+  const quoteFloat = parseFloat(quoteAmount);
+
+  if (!Number.isFinite(baseFloat) || baseFloat < 0) {
+    throw new Error(`baseAmount must be a positive finite number, got ${baseAmount}`);
+  }
+  if (!Number.isFinite(quoteFloat) || quoteFloat < 0) {
+    throw new Error(`quoteAmount must be a positive finite number, got ${quoteAmount}`);
+  }
+
+  const scaledBase = baseFloat * 10 ** baseDecimals;
+  const scaledQuote = quoteFloat * 10 ** quoteDecimals;
+
+  if (!Number.isFinite(scaledBase)) {
+    throw new Error(`baseAmount ${baseAmount} too large for ${baseDecimals} decimals`);
+  }
+  if (!Number.isFinite(scaledQuote)) {
+    throw new Error(`quoteAmount ${quoteAmount} too large for ${quoteDecimals} decimals`);
+  }
+
+  // SECURITY FIX: Validate amounts don't exceed u64::MAX to prevent on-chain overflow
+  const MAX_U64 = BigInt("18446744073709551615");
+  const baseAmountRaw = BigInt(Math.floor(scaledBase));
+  const quoteAmountRaw = BigInt(Math.floor(scaledQuote));
+
+  if (baseAmountRaw > MAX_U64) {
+    throw new Error(`baseAmount exceeds u64 maximum: ${baseAmountRaw}`);
+  }
+  if (quoteAmountRaw > MAX_U64) {
+    throw new Error(`quoteAmount exceeds u64 maximum: ${quoteAmountRaw}`);
+  }
 
   // Build deposits array - distribute evenly across bins
   // IDL expects: { bin_index: u64, base_in: u64, quote_in: u64, min_shares_out: u64 }
@@ -838,10 +927,12 @@ export async function buildPoolCreationWithLiquidityTransactions(
     try {
       // Use getProgramAccounts with memcmp filter to find all position bins for this position
       // PositionBin account structure: discriminator(8) + position(32) + bin_index(4) + ...
+      // SECURITY FIX: Use dataSlice to reduce response size and prevent DOS
       const existingPositionBins = await connection.getProgramAccounts(
         PROGRAM_ID,
         {
           commitment: "confirmed",
+          dataSlice: { offset: 72, length: 8 }, // Only fetch bin_index field (u64 at offset 72)
           filters: [
             { dataSize: 136 }, // PositionBin: 8 (disc) + 32 (pos) + 32 (pool) + 8 (idx) + 16 (shares) + 16 (fee_base) + 16 (fee_quote) + 8 (ts) = 136
             { memcmp: { offset: 8, bytes: positionPda.toBase58() } }, // Position field at offset 8
@@ -849,13 +940,25 @@ export async function buildPoolCreationWithLiquidityTransactions(
         }
       );
 
+      // SECURITY FIX: Limit number of position bins to prevent DOS attacks
+      // Attacker could create position with 10,000+ bins and trigger massive RPC response
+      const MAX_POSITION_BINS = 1000;
+      if (existingPositionBins.length > MAX_POSITION_BINS) {
+        throw new Error(
+          `Position has too many bins (${existingPositionBins.length}). ` +
+          `Maximum allowed: ${MAX_POSITION_BINS}. ` +
+          `This pool may be in an invalid state. Contact support.`
+        );
+      }
+
       // Decode bin_index from each position bin account
       const newBinIndices = depositsRaw.map(d => d.bin_index);
 
       for (const { account } of existingPositionBins) {
         // PositionBin structure: discriminator(8) + position(32) + pool(32) + bin_index(8) + ...
         // CRITICAL: bin_index is stored as u64 (8 bytes), not i32 (4 bytes)
-        const binIndexU64 = account.data.readBigUInt64LE(72); // bin_index at offset 72 (8 + 32 + 32)
+        // SECURITY FIX: dataSlice returns only bin_index field, so read from offset 0
+        const binIndexU64 = account.data.readBigUInt64LE(0); // bin_index at offset 0 (due to dataSlice)
 
         // Convert from u64 canonical encoding to signed i32
         // Rust stores: (bin_index_i32 as i64) as u64
@@ -883,16 +986,29 @@ export async function buildPoolCreationWithLiquidityTransactions(
     console.log("[POOL_CREATION] Position exists but has NO PositionBins. Scanning BinArrays for orphaned liquidity...");
 
     try {
+      // SECURITY FIX: Fetch only required data to reduce response size
       const binArrayAccounts = await connection.getProgramAccounts(
         PROGRAM_ID,
         {
           commitment: "confirmed",
+          // Fetch lower_bin_index (4 bytes at offset 5160) + bins array (64 bins * 80 bytes at offset 40)
+          // Total: 40 (skip) + 5120 (bins) + 4 (lower_bin_index) = 5164 bytes
           filters: [
             { dataSize: 5176 }, // BinArray account size
             { memcmp: { offset: 8, bytes: poolPda.toBase58() } }, // pool field at offset 8
           ],
         }
       );
+
+      // SECURITY FIX: Limit number of BinArrays to prevent DOS attacks
+      const MAX_BIN_ARRAYS = 20; // Max ~1280 bins (64 bins per array)
+      if (binArrayAccounts.length > MAX_BIN_ARRAYS) {
+        throw new Error(
+          `Pool has too many BinArrays (${binArrayAccounts.length}). ` +
+          `Maximum allowed: ${MAX_BIN_ARRAYS}. ` +
+          `This pool may be in an invalid state.`
+        );
+      }
 
       console.log(`[POOL_CREATION] Found ${binArrayAccounts.length} BinArray accounts`);
 
@@ -1017,9 +1133,11 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const POSITION_BIN_SEED = Buffer.from("position_bin");
 
   // Check which position bins already exist on-chain
+  // SECURITY FIX: Use i32 (4 bytes) to match PDA derivation in derivePositionBinPda
+  // Previous code used u64 (8 bytes) which caused PDA mismatches - checks always returned "missing"
   const positionBinPdas = uniqueBinIndices.map(binIndex => {
-    const binIndexBuffer = Buffer.alloc(8);
-    binIndexBuffer.writeBigUInt64LE(binIndexToU64(binIndex));
+    const binIndexBuffer = Buffer.alloc(4);
+    binIndexBuffer.writeInt32LE(binIndex);
     return PublicKey.findProgramAddressSync(
       [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
       PROGRAM_ID
@@ -1147,9 +1265,14 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
     // CRITICAL FIX: Add reference deposits (1 lamport) for ALL OTHER BinArrays in the batch
     // This ensures vault reconciliation can see liquidity from other transactions in the batch
+    // SECURITY FIX: Limit reference deposits to prevent transaction size overflow (1232 byte limit)
+    // Max safe: (1232 - 400 overhead) / (34 bytes per deposit) = ~24, but we use conservative limit
+    const MAX_REFERENCE_DEPOSITS = 10;
     const crossTxReferenceDeposits: typeof batchDeposits = [];
+    let refCount = 0;
+
     for (const binArrayLower of allBinArraysInBatch) {
-      if (!thisTxBinArrays.has(binArrayLower)) {
+      if (!thisTxBinArrays.has(binArrayLower) && refCount < MAX_REFERENCE_DEPOSITS) {
         // Find any bin in this BinArray from allDeposits
         const representativeBin = allDeposits.find(
           d => Math.floor(d.bin_index / 64) * 64 === binArrayLower
@@ -1160,9 +1283,14 @@ export async function buildPoolCreationWithLiquidityTransactions(
             base_in: 1n,  // 1 lamport minimum
             quote_in: 0n,
           });
+          refCount++;
           console.log(`[POOL_CREATION] TX ${Math.floor(i / BATCH_SIZE) + 1}: Adding cross-tx reference deposit for BinArray ${binArrayLower} (bin ${representativeBin.bin_index})`);
         }
       }
+    }
+
+    if (refCount === MAX_REFERENCE_DEPOSITS && allBinArraysInBatch.size - thisTxBinArrays.size > MAX_REFERENCE_DEPOSITS) {
+      console.warn(`[POOL_CREATION] WARNING: Truncated reference deposits to ${MAX_REFERENCE_DEPOSITS} (had ${allBinArraysInBatch.size - thisTxBinArrays.size} BinArrays)`);
     }
 
     // Combine cross-tx reference deposits + this transaction's deposits
@@ -1485,11 +1613,34 @@ export async function buildPoolCreationBatchTransactions(
   // Calculate bin range
   const priceQ64_64 = calculatePriceQ64_64(initialPrice, baseDecimals, quoteDecimals);
   const activeBin = priceToActiveBin(priceQ64_64, binStepBps);
+
+  // SECURITY FIX: Validate inputs BEFORE arithmetic to prevent integer overflow
+  if (binsLeft < 0 || binsRight < 0) {
+    throw new Error(`Bin counts cannot be negative: binsLeft=${binsLeft}, binsRight=${binsRight}`);
+  }
+
+  // SECURITY FIX: Check arithmetic won't overflow i32 bounds BEFORE performing it
+  const MIN_I32 = -2147483648;
+  const MAX_I32 = 2147483647;
+
+  if (activeBin - binsLeft < MIN_I32) {
+    throw new Error(
+      `Lower bin index would underflow i32: activeBin=${activeBin}, binsLeft=${binsLeft}. ` +
+      `Result would be < ${MIN_I32}. Reduce binsLeft.`
+    );
+  }
+  if (activeBin + binsRight > MAX_I32) {
+    throw new Error(
+      `Upper bin index would overflow i32: activeBin=${activeBin}, binsRight=${binsRight}. ` +
+      `Result would be > ${MAX_I32}. Reduce binsRight.`
+    );
+  }
+
   const lowerBinIndex = activeBin - binsLeft;
   const upperBinIndex = activeBin + binsRight;
 
-  // Validate bin range
-  if (lowerBinIndex < -2147483648 || upperBinIndex > 2147483647) {
+  // Validate bin range is within i32 bounds (redundant but safe)
+  if (lowerBinIndex < MIN_I32 || upperBinIndex > MAX_I32) {
     throw new Error(
       `Bin range [${lowerBinIndex}, ${upperBinIndex}] exceeds i32 bounds. ` +
       `Reduce binsLeft (${binsLeft}) or binsRight (${binsRight}).`
@@ -1509,8 +1660,39 @@ export async function buildPoolCreationBatchTransactions(
   console.log(`[POOL_CREATION_BATCH] Active bin: ${activeBin}`);
 
   // Convert amounts to raw (atoms)
-  const baseAmountRaw = BigInt(Math.floor(parseFloat(baseAmount) * 10 ** baseDecimals));
-  const quoteAmountRaw = BigInt(Math.floor(parseFloat(quoteAmount) * 10 ** quoteDecimals));
+  // SECURITY FIX: Validate amounts are finite before BigInt conversion to prevent RangeError crash
+  // parseFloat("1e308") * 10^6 = Infinity → BigInt(Infinity) throws RangeError
+  const baseFloat = parseFloat(baseAmount);
+  const quoteFloat = parseFloat(quoteAmount);
+
+  if (!Number.isFinite(baseFloat) || baseFloat < 0) {
+    throw new Error(`baseAmount must be a positive finite number, got ${baseAmount}`);
+  }
+  if (!Number.isFinite(quoteFloat) || quoteFloat < 0) {
+    throw new Error(`quoteAmount must be a positive finite number, got ${quoteAmount}`);
+  }
+
+  const scaledBase = baseFloat * 10 ** baseDecimals;
+  const scaledQuote = quoteFloat * 10 ** quoteDecimals;
+
+  if (!Number.isFinite(scaledBase)) {
+    throw new Error(`baseAmount ${baseAmount} too large for ${baseDecimals} decimals`);
+  }
+  if (!Number.isFinite(scaledQuote)) {
+    throw new Error(`quoteAmount ${quoteAmount} too large for ${quoteDecimals} decimals`);
+  }
+
+  // SECURITY FIX: Validate amounts don't exceed u64::MAX to prevent on-chain overflow
+  const MAX_U64 = BigInt("18446744073709551615");
+  const baseAmountRaw = BigInt(Math.floor(scaledBase));
+  const quoteAmountRaw = BigInt(Math.floor(scaledQuote));
+
+  if (baseAmountRaw > MAX_U64) {
+    throw new Error(`baseAmount exceeds u64 maximum: ${baseAmountRaw}`);
+  }
+  if (quoteAmountRaw > MAX_U64) {
+    throw new Error(`quoteAmount exceeds u64 maximum: ${quoteAmountRaw}`);
+  }
 
   // Build deposits array - distribute evenly across bins
   const depositsRaw: Array<{ bin_index: number; base_in: bigint; quote_in: bigint; min_shares_out: bigint }> = [];
@@ -1632,7 +1814,7 @@ export async function buildPoolCreationBatchTransactions(
 
     // Encode deposits for IDL
     const depositsEncoded = batchDeposits.map(d => ({
-      bin_index: binIndexToU64(d.bin_index),
+      bin_index: new BN(binIndexToU64(d.bin_index).toString()),
       base_in: new BN(d.base_in.toString()),
       quote_in: new BN(d.quote_in.toString()),
       min_shares_out: new BN(d.min_shares_out.toString()),

@@ -808,9 +808,10 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const totalBins = upperBinIndex - lowerBinIndex + 1;
 
   // CRITICAL FIX: Count bins that actually use each token
-  // In DLMM: bins <= activeBin get base, bins >= activeBin get quote, activeBin gets both
-  const binsWithBase = activeBin - lowerBinIndex + 1;   // Bins at or below active (inclusive)
-  const binsWithQuote = upperBinIndex - activeBin + 1;  // Bins at or above active (inclusive)
+  // SECURITY FIX: Active bin is EXCLUDED from deposits (program forbids ActiveBinDepositForbidden)
+  // In DLMM: bins < activeBin get base, bins > activeBin get quote
+  const binsWithBase = activeBin - lowerBinIndex;   // Bins below active (exclusive)
+  const binsWithQuote = upperBinIndex - activeBin;  // Bins above active (exclusive)
 
   // Validate amounts are sufficient for distribution
   if (baseAmountRaw > 0n && baseAmountRaw < BigInt(binsWithBase)) {
@@ -834,9 +835,9 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   console.log(`[POOL_CREATION] Liquidity distribution:`);
   console.log(`  Total bins: ${totalBins} (${lowerBinIndex} to ${upperBinIndex})`);
-  console.log(`  Active bin: ${activeBin}`);
-  console.log(`  Bins with base: ${binsWithBase} (≤ active)`);
-  console.log(`  Bins with quote: ${binsWithQuote} (≥ active)`);
+  console.log(`  Active bin: ${activeBin} (EXCLUDED from deposits)`);
+  console.log(`  Bins with base: ${binsWithBase} (< active)`);
+  console.log(`  Bins with quote: ${binsWithQuote} (> active)`);
   console.log(`  Base: ${baseAmountRaw} atoms = ${baseShare}/bin + ${baseRemainder} remainder`);
   console.log(`  Quote: ${quoteAmountRaw} atoms = ${quoteShare}/bin + ${quoteRemainder} remainder`);
 
@@ -845,11 +846,19 @@ export async function buildPoolCreationWithLiquidityTransactions(
   let quoteCounter = 0; // Counter for bins receiving quote tokens
 
   for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
+    // CRITICAL FIX: Skip active bin entirely
+    // Rust program forbids deposits into active bin (ActiveBinDepositForbidden)
+    // Active bin should only have MM liquidity, not LP liquidity
+    if (binIndex === activeBin) {
+      console.log(`[POOL_CREATION] Skipping active bin ${activeBin} (deposits forbidden by program)`);
+      continue;
+    }
+
     let binBaseAmount = 0n;
     let binQuoteAmount = 0n;
 
-    // Distribute base tokens to bins <= activeBin
-    if (binIndex <= activeBin && baseShare > 0n) {
+    // Distribute base tokens to bins < activeBin (changed from <=)
+    if (binIndex < activeBin && baseShare > 0n) {
       binBaseAmount = baseShare;
       // Distribute remainder: first N bins get +1 atom each (N = remainder)
       if (baseCounter < Number(baseRemainder)) {
@@ -858,8 +867,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
       baseCounter++;
     }
 
-    // Distribute quote tokens to bins >= activeBin
-    if (binIndex >= activeBin && quoteShare > 0n) {
+    // Distribute quote tokens to bins > activeBin (changed from >=)
+    if (binIndex > activeBin && quoteShare > 0n) {
       binQuoteAmount = quoteShare;
       // Distribute remainder: first N bins get +1 atom each (N = remainder)
       if (quoteCounter < Number(quoteRemainder)) {
@@ -1698,8 +1707,9 @@ export async function buildPoolCreationBatchTransactions(
   // Build deposits array - distribute evenly across bins
   const depositsRaw: Array<{ bin_index: number; base_in: bigint; quote_in: bigint; min_shares_out: bigint }> = [];
 
-  const binsWithBase = activeBin - lowerBinIndex + 1;
-  const binsWithQuote = upperBinIndex - activeBin + 1;
+  // SECURITY FIX: Active bin is EXCLUDED from deposits (program forbids ActiveBinDepositForbidden)
+  const binsWithBase = activeBin - lowerBinIndex;   // Bins below active (exclusive)
+  const binsWithQuote = upperBinIndex - activeBin;  // Bins above active (exclusive)
 
   // Calculate per-bin shares and remainders
   const baseShare = binsWithBase > 0 ? baseAmountRaw / BigInt(binsWithBase) : 0n;
@@ -1709,8 +1719,9 @@ export async function buildPoolCreationBatchTransactions(
 
   console.log(`[POOL_CREATION_BATCH] Liquidity distribution:`);
   console.log(`  Total bins: ${totalBins}`);
-  console.log(`  Bins with base: ${binsWithBase} (≤ active)`);
-  console.log(`  Bins with quote: ${binsWithQuote} (≥ active)`);
+  console.log(`  Active bin: ${activeBin} (EXCLUDED from deposits)`);
+  console.log(`  Bins with base: ${binsWithBase} (< active)`);
+  console.log(`  Bins with quote: ${binsWithQuote} (> active)`);
   console.log(`  Base: ${baseAmountRaw} atoms = ${baseShare}/bin + ${baseRemainder} remainder`);
   console.log(`  Quote: ${quoteAmountRaw} atoms = ${quoteShare}/bin + ${quoteRemainder} remainder`);
 
@@ -1719,11 +1730,19 @@ export async function buildPoolCreationBatchTransactions(
   let quoteCounter = 0;
 
   for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
+    // CRITICAL FIX: Skip active bin entirely
+    // Rust program forbids deposits into active bin (ActiveBinDepositForbidden)
+    // Active bin should only have MM liquidity, not LP liquidity
+    if (binIndex === activeBin) {
+      console.log(`[POOL_CREATION_BATCH] Skipping active bin ${activeBin} (deposits forbidden by program)`);
+      continue;
+    }
+
     let binBaseAmount = 0n;
     let binQuoteAmount = 0n;
 
-    // Distribute base to bins <= activeBin
-    if (binIndex <= activeBin && baseShare > 0n) {
+    // Distribute base to bins < activeBin (changed from <=)
+    if (binIndex < activeBin && baseShare > 0n) {
       binBaseAmount = baseShare;
       if (baseCounter < Number(baseRemainder)) {
         binBaseAmount += 1n;
@@ -1731,8 +1750,8 @@ export async function buildPoolCreationBatchTransactions(
       baseCounter++;
     }
 
-    // Distribute quote to bins >= activeBin
-    if (binIndex >= activeBin && quoteShare > 0n) {
+    // Distribute quote to bins > activeBin (changed from >=)
+    if (binIndex > activeBin && quoteShare > 0n) {
       binQuoteAmount = quoteShare;
       if (quoteCounter < Number(quoteRemainder)) {
         binQuoteAmount += 1n;

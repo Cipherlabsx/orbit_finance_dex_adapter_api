@@ -752,6 +752,80 @@ export type OrbitFinance = {
       ]
     },
     {
+      "name": "closePosition",
+      "docs": [
+        "Closes a position (owner only). Position must have no active liquidity."
+      ],
+      "discriminator": [
+        123,
+        134,
+        81,
+        0,
+        49,
+        68,
+        98,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "docs": [
+            "Owner of the position (must sign)"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "docs": [
+            "Pool that the position belongs to"
+          ]
+        },
+        {
+          "name": "position",
+          "docs": [
+            "Position PDA to close"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "createBinArray",
       "docs": [
         "Creates a new BinArray account (holds 64 consecutive bins).",
@@ -2397,6 +2471,39 @@ export type OrbitFinance = {
       ]
     },
     {
+      "name": "unpauseOverride",
+      "docs": [
+        "Emergency unpause override by Squads multisig.",
+        "Can unpause pool regardless of pause_guardian state.",
+        "Hardcoded to Squads multisig: 7nEfnDyd7ZuzK2UK4mqqP45js89YdeWBqyUmd9KCxNrn"
+      ],
+      "discriminator": [
+        150,
+        175,
+        134,
+        15,
+        132,
+        92,
+        237,
+        185
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "squadsSigner",
+          "docs": [
+            "Squads multisig signer (hardcoded address)",
+            "TODO: Require multisig approval (currently single signer for testing)"
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "updateAdmin",
       "docs": [
         "Updates the pool admin (admin only)."
@@ -3455,6 +3562,26 @@ export type OrbitFinance = {
       "code": 6064,
       "name": "claimTooSoon",
       "msg": "Claim cooldown not elapsed. Please wait before claiming again."
+    },
+    {
+      "code": 6065,
+      "name": "positionHasLiquidity",
+      "msg": "Position has active liquidity and cannot be closed. Withdraw all liquidity first."
+    },
+    {
+      "code": 6066,
+      "name": "excessiveFee",
+      "msg": "Fee exceeds maximum allowed (10%). Cannot set base_fee_bps > 1000."
+    },
+    {
+      "code": 6067,
+      "name": "feeConfigImmutable",
+      "msg": "Fee configuration is immutable after pool creation. Cannot change fees once pool has liquidity or swaps."
+    },
+    {
+      "code": 6068,
+      "name": "pauseDurationExceeded",
+      "msg": "Pause duration exceeds maximum allowed (7 days). Automatic unpause required."
     }
   ],
   "types": [

@@ -113,14 +113,20 @@ export type SerializedInstruction = {
 const ALLOWED_BIN_STEPS = [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400];
 
 /**
- * Convert signed bin index (i32) to canonical u64 encoding
- * Matches Rust's canonical encoding: (bin_index as i64) as u64
+ * Convert signed bin index (i32) to canonical u64 encoding FOR INSTRUCTION DATA ONLY.
  *
+ * WARNING: This function is for encoding bin_index in instruction data where
+ * the Rust program stores it as u64. DO NOT use this for PDA derivation!
+ *
+ * - PDA derivation: Uses i32 (4 bytes) → use derivePositionBinPda() function
+ * - Instruction data: Uses u64 (8 bytes) → use this function
+ *
+ * Matches Rust's canonical encoding: (bin_index as i64) as u64
  * This performs 64-bit sign extension for negative values, NOT 32-bit two's complement.
  * Example: -1224 → 0xFFFFFFFFFFFFFB38 (18446744073709550392)
  *
  * @param binIndexSigned - Signed bin index (i32 range: -2147483648 to 2147483647)
- * @returns Canonical u64 encoding (64-bit sign extension)
+ * @returns Canonical u64 encoding (64-bit sign extension) for instruction data
  */
 function binIndexToU64(binIndexSigned: number): bigint {
   // Rust canonical encoding: (i32 as i64) as u64
@@ -1140,19 +1146,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
   // CRITICAL: Position bins must be initialized before add_liquidity_v2 can use them
   const uniqueBinIndices = Array.from(new Set(allDepositsForPositionBinCreation.map(d => d.bin_index))).sort((a, b) => a - b);
 
-  const POSITION_BIN_SEED = Buffer.from("position_bin");
-
   // Check which position bins already exist on-chain
-  // CRITICAL FIX: Use u64 (8 bytes) to match Rust program's derive_position_bin_pda
-  const positionBinPdas = uniqueBinIndices.map(binIndex => {
-    const binIndexU64 = binIndexToU64(binIndex);
-    const binIndexBuffer = Buffer.alloc(8);
-    binIndexBuffer.writeBigUInt64LE(binIndexU64, 0);
-    return PublicKey.findProgramAddressSync(
-      [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
-      PROGRAM_ID
-    )[0];
-  });
+  const positionBinPdas = uniqueBinIndices.map(binIndex => derivePositionBinPda(positionPda, binIndex)[0]);
   const positionBinInfos = await connection.getMultipleAccountsInfo(positionBinPdas, "confirmed");
 
   console.log(`[POOL_CREATION] Checking ${uniqueBinIndices.length} position bins for existence`);
@@ -1193,16 +1188,11 @@ export async function buildPoolCreationWithLiquidityTransactions(
     const batchInstructions: SerializedInstruction[] = [];
 
     for (const binIndex of batchBinIndices) {
-      // CRITICAL FIX: Use u64 (8 bytes) for PositionBin PDA to match Rust program
-      const binIndexU64 = binIndexToU64(binIndex);
-      const binIndexBuffer = Buffer.alloc(8);
-      binIndexBuffer.writeBigUInt64LE(binIndexU64, 0);
-      const [positionBinPda] = PublicKey.findProgramAddressSync(
-        [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
-        PROGRAM_ID
-      );
+      // PDA derivation uses i32 (4 bytes) to match Rust program's PDA seeds
+      const [positionBinPda] = derivePositionBinPda(positionPda, binIndex);
 
-      // Encode init_position_bin instruction
+      // Instruction data uses u64 storage format
+      const binIndexU64 = binIndexToU64(binIndex);
       const initPositionBinData = coder.instruction.encode("init_position_bin", {
         bin_index: new BN(binIndexU64.toString()),
       });
@@ -1356,7 +1346,6 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
     // Build remaining accounts in the pattern: [bin_array_0, position_bin_0, bin_array_1, position_bin_1, ...]
     // The program expects deposits.len() * 2 accounts
-    const POSITION_BIN_SEED = Buffer.from("position_bin");
     const remainingAccounts = [];
 
     for (const deposit of finalBatchDeposits) {
@@ -1364,15 +1353,8 @@ export async function buildPoolCreationWithLiquidityTransactions(
       const lowerBinIndex = Math.trunc(deposit.bin_index / 64) * 64; // 64 bins per array (BIN_ARRAY_SIZE)
       const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIndex);
 
-      // CRITICAL FIX: Derive position_bin PDA using u64 (8 bytes) to match Rust program
-      // Seeds: ["position_bin", position_key, bin_index (u64 LE)]
-      const binIndexU64 = binIndexToU64(deposit.bin_index);
-      const binIndexBuffer = Buffer.alloc(8);
-      binIndexBuffer.writeBigUInt64LE(binIndexU64, 0);
-      const [positionBinPda] = PublicKey.findProgramAddressSync(
-        [POSITION_BIN_SEED, positionPda.toBuffer(), binIndexBuffer],
-        PROGRAM_ID
-      );
+      // Derive position_bin PDA using i32 (4 bytes) to match Rust program
+      const [positionBinPda] = derivePositionBinPda(positionPda, deposit.bin_index);
 
       // Add in the required pattern: bin_array, position_bin
       remainingAccounts.push(
@@ -1911,21 +1893,28 @@ export async function buildPoolCreationBatchTransactions(
 
 /**
  * Derives position bin PDA
- * CRITICAL: Rust program uses u64 (8 bytes) for bin_index seed
- * Seeds: ["position_bin", position, bin_index (u64, little-endian)]
+ *
+ * CRITICAL: Rust program uses i32 (4 bytes) for bin_index seed in PDA derivation.
+ *
+ * Seeds: ["position_bin", position, bin_index (i32 4 bytes, little-endian)]
+ *
+ * Reference: /backend_dlmm/programs/orbit_finance/src/instructions/add_liquidity_batch.rs:448
+ * The Rust code uses: bin_index.to_le_bytes() where bin_index is i32, producing 4 bytes.
+ *
+ * Note: While PositionBin state stores bin_index as u64, the PDA derivation itself
+ * uses i32 encoding. These are separate concerns.
  */
 function derivePositionBinPda(position: PublicKey, binIndexI32: number): [PublicKey, number] {
-  // CRITICAL FIX: Use u64 (8 bytes) to match Rust program's derive_position_bin_pda
-  // Rust: bin_index.to_le_bytes() produces 8 bytes from u64
-  // Must convert signed i32 to canonical u64 encoding (64-bit sign extension)
-  const binIndexU64 = binIndexToU64(binIndexI32);
-  const binIndexBuffer = Buffer.alloc(8);
-  binIndexBuffer.writeBigUInt64LE(binIndexU64, 0);
+  // Use i32 (4 bytes) to match Rust program's PDA derivation
+  // Rust: let bin_index_le = bin_index.to_le_bytes(); (where bin_index is i32)
+  const binIndexBuffer = Buffer.alloc(4); // 4 bytes for i32
+  binIndexBuffer.writeInt32LE(binIndexI32, 0);
+
   return PublicKey.findProgramAddressSync(
     [
       Buffer.from("position_bin"),
       position.toBuffer(),
-      binIndexBuffer,
+      binIndexBuffer, // 4-byte seed matches Rust PDA derivation
     ],
     PROGRAM_ID
   );

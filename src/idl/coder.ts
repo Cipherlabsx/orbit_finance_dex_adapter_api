@@ -24,6 +24,7 @@ export function decodeAccount<T = any>(accountName: string, data: Buffer): T {
 export const DISCRIMINATORS = {
   Pool: Buffer.from([241, 154, 109, 4, 17, 177, 109, 188]),
   LiquidityBin: Buffer.from([4, 80, 150, 39, 152, 88, 42, 158]),
+  BinArray: Buffer.from([92, 142, 92, 220, 5, 148, 70, 181]),
   PairRegistry: Buffer.from([180, 142, 99, 6, 243, 194, 134, 152]),
 };
 

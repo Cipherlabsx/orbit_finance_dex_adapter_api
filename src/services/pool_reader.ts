@@ -2,7 +2,7 @@ import { PublicKey } from "@solana/web3.js";
 import { AccountLayout, MintLayout, getAssociatedTokenAddress } from "@solana/spl-token";
 import { PROGRAM_ID, connection, pk } from "../solana.js";
 import { safeNumber } from "../utils/http.js";
-import { deriveBinPda } from "../utils/pda.js";
+import { deriveBinPda, deriveBinArrayPda } from "../utils/pda.js";
 import { decodeAccount } from "../idl/coder.js";
 
 export type PoolView = {
@@ -28,6 +28,7 @@ export type PoolView = {
   pausedBits: number;
   binStepBps: number;
   baseFeeBps: number;
+  accountingMode: number; // 0 = legacy global LP shares, 1 = position-bin shares
 };
 
 export type PoolCompleteView = PoolView & {
@@ -238,6 +239,7 @@ export async function readPool(pool: string): Promise<PoolView> {
   const pauseBits = asNumberI32(pick(raw, ["pauseBits", "pause_bits"]) ?? 0, "pause_bits");
   const binStepBps = asNumberI32(pick(raw, ["binStepBps", "bin_step_bps"]) ?? 0, "bin_step_bps");
   const baseFeeBps = asNumberI32(pick(raw, ["baseFeeBps", "base_fee_bps"]) ?? 0, "base_fee_bps");
+  const accountingMode = asNumberI32(pick(raw, ["accountingMode", "accounting_mode"]) ?? 0, "accounting_mode");
 
   // decimals
   const [baseDecimals, quoteDecimals] = await Promise.all([
@@ -302,6 +304,7 @@ export async function readPool(pool: string): Promise<PoolView> {
     pausedBits: pauseBits,
     binStepBps,
     baseFeeBps,
+    accountingMode,
   };
 }
 
@@ -390,8 +393,10 @@ export async function readPoolComplete(pool: string): Promise<PoolCompleteView> 
 }
 
 /**
- * Read a histogram window of LiquidityBin accounts around activeBin.
- * price per bin computed from pool.priceNumber and binStepBps.
+ * Read a histogram window of bin reserves around activeBin.
+ * - For position-bin mode (accounting_mode=1): reads BinArrays
+ * - For legacy mode (accounting_mode=0): reads individual LiquidityBin PDAs
+ * Price per bin computed from pool.priceNumber and binStepBps.
  */
 export async function readBins(pool: string, opts?: { radius?: number; limit?: number }): Promise<BinsView> {
   const radius = Math.max(10, Math.min(2000, Math.trunc(opts?.radius ?? 300)));
@@ -405,21 +410,7 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
   const binIds: number[] = [];
   for (let b = startBin; b <= endBin; b++) binIds.push(b);
 
-  // derive all bin PDAs
-  const pdas = binIds.map((binId) => {
-    const seed = binIdI32ToSeedU64(binId);
-    return deriveBinPda(PROGRAM_ID, poolPk, seed);
-  });
-
-  // batch fetch
-  const batches = chunk(pdas, 100);
-  const infos: (Awaited<ReturnType<typeof connection.getMultipleAccountsInfo>>[number])[] = [];
-  for (const b of batches) {
-    const res = await connection.getMultipleAccountsInfo(b, "confirmed");
-    infos.push(...res);
-  }
-
-  // pre-fill all bins
+  // Pre-fill all bins with zero reserves
   const points: BinPoint[] = binIds.map((binId) => {
     const priceActive = poolView.priceNumber;
     const price =
@@ -437,32 +428,114 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     };
   });
 
-    // fill decoded reserves where accounts exist
-  for (let i = 0; i < infos.length && i < points.length; i++) {
-    const info = infos[i];
-    if (!info?.data) continue;
+  // Determine reading strategy based on accounting mode
+  const BINS_PER_ARRAY = 64;
+  const isPositionMode = poolView.accountingMode === 1;
 
-    try {
-      const binRaw: any = decodeAccount("LiquidityBin", Buffer.from(info.data));
-      const reserveBaseVal = pick<any>(binRaw, ["reserveBase", "reserve_base"]);
-      const reserveQuoteVal = pick<any>(binRaw, ["reserveQuote", "reserve_quote"]);
-      if (reserveBaseVal == null || reserveQuoteVal == null) continue;
+  if (isPositionMode) {
+    // POSITION-BIN MODE: Read BinArrays
+    // Calculate which BinArrays we need
+    const lowerBinIndexFrom = (binId: number): number => {
+      return Math.floor(binId / BINS_PER_ARRAY) * BINS_PER_ARRAY;
+    };
 
-      const baseAtoms = BigInt(asU64String(reserveBaseVal, "reserve_base")).toString();
-      const quoteAtoms = BigInt(asU64String(reserveQuoteVal, "reserve_quote")).toString();
+    const lowerIndexes = new Set<number>();
+    for (const binId of binIds) {
+      lowerIndexes.add(lowerBinIndexFrom(binId));
+    }
 
-      const p = points[i]!;
-      p.baseAtoms = baseAtoms;
-      p.quoteAtoms = quoteAtoms;
-      p.baseUi = toUi(baseAtoms, poolView.baseDecimals);
-      p.quoteUi = toUi(quoteAtoms, poolView.quoteDecimals);
-    } catch {
-      // ignore decode failures
+    const lowerIndexesArr = Array.from(lowerIndexes).sort((a, b) => a - b);
+    const binArrayPdas = lowerIndexesArr.map((lower) => deriveBinArrayPda(PROGRAM_ID, poolPk, lower));
+
+    // Fetch BinArrays in batches
+    const batches = chunk(binArrayPdas, 100);
+    const infos: (Awaited<ReturnType<typeof connection.getMultipleAccountsInfo>>[number])[] = [];
+    for (const b of batches) {
+      const res = await connection.getMultipleAccountsInfo(b, "confirmed");
+      infos.push(...res);
+    }
+
+    // Map lower index -> account data
+    const binArrayMap = new Map<number, Buffer>();
+    for (let i = 0; i < lowerIndexesArr.length && i < infos.length; i++) {
+      const info = infos[i];
+      if (info?.data) {
+        binArrayMap.set(lowerIndexesArr[i]!, Buffer.from(info.data));
+      }
+    }
+
+    // Decode BinArrays and extract bin reserves
+    for (const [lowerIndex, data] of binArrayMap.entries()) {
+      try {
+        const binArrayRaw: any = decodeAccount("BinArray", data);
+        const binsArr = binArrayRaw?.bins || [];
+
+        // BinArray has 64 bins starting at lowerIndex
+        for (let localIdx = 0; localIdx < BINS_PER_ARRAY && localIdx < binsArr.length; localIdx++) {
+          const binId = lowerIndex + localIdx;
+          const pointIdx = binIds.indexOf(binId);
+          if (pointIdx === -1) continue;
+
+          const binData = binsArr[localIdx];
+          if (!binData) continue;
+
+          const reserveBaseVal = pick<any>(binData, ["reserveBase", "reserve_base"]);
+          const reserveQuoteVal = pick<any>(binData, ["reserveQuote", "reserve_quote"]);
+          if (reserveBaseVal == null || reserveQuoteVal == null) continue;
+
+          const baseAtoms = BigInt(asU128(reserveBaseVal, "reserve_base")).toString();
+          const quoteAtoms = BigInt(asU128(reserveQuoteVal, "reserve_quote")).toString();
+
+          const p = points[pointIdx]!;
+          p.baseAtoms = baseAtoms;
+          p.quoteAtoms = quoteAtoms;
+          p.baseUi = toUi(baseAtoms, poolView.baseDecimals);
+          p.quoteUi = toUi(quoteAtoms, poolView.quoteDecimals);
+        }
+      } catch (e) {
+        // Ignore decode failures for this BinArray
+        console.warn(`Failed to decode BinArray at lower=${lowerIndex}:`, e instanceof Error ? e.message : String(e));
+      }
+    }
+  } else {
+    // LEGACY MODE: Read individual LiquidityBin PDAs
+    const pdas = binIds.map((binId) => {
+      const seed = binIdI32ToSeedU64(binId);
+      return deriveBinPda(PROGRAM_ID, poolPk, seed);
+    });
+
+    const batches = chunk(pdas, 100);
+    const infos: (Awaited<ReturnType<typeof connection.getMultipleAccountsInfo>>[number])[] = [];
+    for (const b of batches) {
+      const res = await connection.getMultipleAccountsInfo(b, "confirmed");
+      infos.push(...res);
+    }
+
+    for (let i = 0; i < infos.length && i < points.length; i++) {
+      const info = infos[i];
+      if (!info?.data) continue;
+
+      try {
+        const binRaw: any = decodeAccount("LiquidityBin", Buffer.from(info.data));
+        const reserveBaseVal = pick<any>(binRaw, ["reserveBase", "reserve_base"]);
+        const reserveQuoteVal = pick<any>(binRaw, ["reserveQuote", "reserve_quote"]);
+        if (reserveBaseVal == null || reserveQuoteVal == null) continue;
+
+        const baseAtoms = BigInt(asU64String(reserveBaseVal, "reserve_base")).toString();
+        const quoteAtoms = BigInt(asU64String(reserveQuoteVal, "reserve_quote")).toString();
+
+        const p = points[i]!;
+        p.baseAtoms = baseAtoms;
+        p.quoteAtoms = quoteAtoms;
+        p.baseUi = toUi(baseAtoms, poolView.baseDecimals);
+        p.quoteUi = toUi(quoteAtoms, poolView.quoteDecimals);
+      } catch {
+        // ignore decode failures
+      }
     }
   }
 
-  // Normalize bin "reserves" to match vault totals.
-  // This prevents impossible states like bins summing to > vault balances.
+  // Normalize bin reserves to match vault totals (prevents impossible states)
   const baseVaultRaw = await readTokenAccountAmountRaw(pk(poolView.baseVault));
   const quoteVaultRaw = await readTokenAccountAmountRaw(pk(poolView.quoteVault));
 
@@ -474,7 +547,7 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     sumQuote += BigInt(p.quoteAtoms);
   }
 
-  // only scale if mismatch is significant (>5%)
+  // Only scale if mismatch is significant (>5%)
   const needsBaseScale =
     sumBase > 0n &&
     (sumBase > (baseVaultRaw * 105n) / 100n || sumBase < (baseVaultRaw * 95n) / 100n);
@@ -498,7 +571,6 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     for (let i = 0; i < nonzero.length; i++) {
       const p = nonzero[i]!;
       if (i === nonzero.length - 1) {
-        // last one gets exact remainder so totals match perfectly
         setAtoms(p, total - used);
       } else {
         const v = (getAtoms(p) * total) / sum;
@@ -530,7 +602,7 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     );
   }
 
-  // recompute UI after scaling
+  // Recompute UI after scaling
   for (const p of points) {
     p.baseUi = toUi(p.baseAtoms, poolView.baseDecimals);
     p.quoteUi = toUi(p.quoteAtoms, poolView.quoteDecimals);
@@ -557,7 +629,7 @@ export async function readBins(pool: string, opts?: { radius?: number; limit?: n
     activeBin: poolView.activeBin,
     initialBin: poolView.initialBin,
     binStepBps: poolView.binStepBps,
-    priceActive: poolView.priceNumber, 
+    priceActive: poolView.priceNumber,
     bins,
   };
 }

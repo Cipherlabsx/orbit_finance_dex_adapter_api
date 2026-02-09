@@ -85,7 +85,7 @@ export type PoolCreationWithLiquidityParams = PoolCreationParams & {
  */
 export type PoolCreationResult = {
   transactions: Array<{
-    type: "init_pool" | "create_bin_arrays" | "init_position" | "init_position_bins" | "add_liquidity";
+    type: "init_pool" | "create_bin_arrays" | "init_position" | "init_position_bins" | "add_liquidity" | "verify_accounting";
     instructions: SerializedInstruction[];
   }>;
   poolAddress: string;
@@ -1879,10 +1879,68 @@ export async function buildPoolCreationBatchTransactions(
   console.log(`  1. init_pool (creates pool + 6 vaults)`);
   console.log(`  2-${1 + addLiquidityBatchTransactions.length}. add_liquidity_batch (lazy creates everything + deposits liquidity)`);
 
+  // Build verify_pool_accounting transaction
+  console.log(`[POOL_CREATION_BATCH] Building verification transaction...`);
+
+  // Collect ALL unique BinArrays that were created/used
+  const uniqueBinArrays = new Set<string>();
+  for (const deposit of depositsRaw) {
+    const binIndexI32 = deposit.bin_index;
+    const arrayLower = Math.floor(binIndexI32 / 64) * 64;
+    const binArrayBytes = Buffer.alloc(4);
+    binArrayBytes.writeInt32LE(arrayLower, 0);
+    const [binArrayPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("bin_array"), poolPda.toBuffer(), binArrayBytes],
+      PROGRAM_ID
+    );
+    uniqueBinArrays.add(binArrayPda.toBase58());
+  }
+
+  const binArrayAccounts = Array.from(uniqueBinArrays).map(addr => ({
+    pubkey: new PublicKey(addr),
+    isSigner: false,
+    isWritable: false,
+  }));
+
+  console.log(`[POOL_CREATION_BATCH] Verification will check ${binArrayAccounts.length} unique BinArray(s)`);
+
+  // Build verify_pool_accounting instruction
+  const verifyData = coder.instruction.encode("verify_pool_accounting", {});
+
+  const verifyPoolAccountingIx = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: poolPda, isSigner: false, isWritable: false },         // Read-only verification
+      { pubkey: baseVaultPda, isSigner: false, isWritable: false },    // Read-only verification
+      { pubkey: quoteVaultPda, isSigner: false, isWritable: false },   // Read-only verification
+      { pubkey: adminPk, isSigner: true, isWritable: false },
+      ...binArrayAccounts,
+    ],
+    data: verifyData,
+  });
+
+  const verifyMemoIx = createMemoInstruction("Verifying Pool Accounting");
+
+  const verifyTransaction = {
+    type: "verify_accounting" as const,
+    instructions: [
+      serializeInstruction(computeUnitLimitIx),
+      serializeInstruction(computeUnitPriceIx),
+      serializeInstruction(verifyMemoIx),
+      serializeInstruction(verifyPoolAccountingIx),
+    ],
+  };
+
+  console.log(`[POOL_CREATION_BATCH] ✓ Built ${2 + addLiquidityBatchTransactions.length} transactions total`);
+  console.log(`  1. init_pool (creates pool + 6 vaults)`);
+  console.log(`  2-${1 + addLiquidityBatchTransactions.length}. add_liquidity_batch (lazy creates everything + deposits liquidity)`);
+  console.log(`  ${2 + addLiquidityBatchTransactions.length}. verify_pool_accounting (validates vault reconciliation)`);
+
   return {
     transactions: [
       ...baseResult.transactions,
       ...addLiquidityBatchTransactions,
+      verifyTransaction,
     ],
     poolAddress: baseResult.poolAddress,
     lpMintPublicKey: baseResult.lpMintPublicKey,

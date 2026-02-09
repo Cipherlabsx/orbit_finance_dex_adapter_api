@@ -17,7 +17,7 @@ import { dbListTokens, dbGetToken } from "../services/token_registry.js";
 import { getTokenPrice, getRelativePrice, getBatchPrices } from "../services/price_oracle.js";
 import { calculateHolderClaimable, calculateNftClaimable } from "../services/rewards.js";
 import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, buildPoolCreationBatchTransactions, type FeeConfig } from "../services/pool_creation.js";
-import { readPool } from "../services/pool_reader.js";
+import { readPoolComplete } from "../services/pool_reader.js";
 import { upsertDexPool, supabase } from "../supabase.js";
 import { connection } from "../solana.js";
 import {
@@ -553,10 +553,10 @@ export async function v1Routes(app: FastifyInstance) {
 
     try {
 
-      // Fetch pool account from chain to verify it exists and get metadata
+      // Fetch complete pool account from chain including LP supply, escrow, and liquidity
       let poolData;
       try {
-        poolData = await readPool(body.poolAddress);
+        poolData = await readPoolComplete(body.poolAddress);
       } catch (error) {
         reply.code(404);
         return {
@@ -575,12 +575,19 @@ export async function v1Routes(app: FastifyInstance) {
         quoteDecimals: poolData.quoteDecimals,
         baseVault: poolData.baseVault,
         quoteVault: poolData.quoteVault,
+        lpMint: poolData.lpMint,
         admin: poolData.admin,
         baseFeeBps: poolData.baseFeeBps,
         binStepBps: poolData.binStepBps,
         activeBin: poolData.activeBin,
         initialBin: poolData.initialBin,
         pausedBits: poolData.pausedBits,
+        lastPriceQuotePerBase: poolData.priceNumber,
+        escrowLpAta: poolData.escrowLpAta,
+        escrowLpRaw: poolData.escrowLpRaw,
+        lpSupplyRaw: poolData.lpSupplyRaw,
+        liquidityQuote: poolData.liquidityQuote,
+        tvlLockedQuote: poolData.tvlLockedQuote,
         creatorFeeVault: poolData.creatorFeeVault,
         holdersFeeVault: poolData.holdersFeeVault,
         nftFeeVault: poolData.nftFeeVault,

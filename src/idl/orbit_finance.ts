@@ -2625,6 +2625,72 @@ export type OrbitFinance = {
       ]
     },
     {
+      "name": "verifyPoolAccounting",
+      "docs": [
+        "Verifies pool accounting by reconciling vault balances with bin reserves.",
+        "",
+        "This instruction validates that total vault balances match the sum of all",
+        "bin reserves across all BinArrays. Should be called AFTER batched liquidity",
+        "operations complete to ensure no accounting drift occurred.",
+        "",
+        "# Arguments",
+        "* `ctx` - Instruction context with pool, vaults, and verifier",
+        "",
+        "# Remaining Accounts",
+        "All BinArray accounts for the pool must be passed. Missing BinArrays will",
+        "cause false drift detection.",
+        "",
+        "# Security",
+        "- Permissionless (anyone can verify)",
+        "- Fails if any accounting drift detected",
+        "- Emits PoolAccountingVerified event on success",
+        "",
+        "# Usage",
+        "- Call after completing batched add_liquidity_batch operations",
+        "- Call before marking pool as \"active\" for trading",
+        "- Call periodically to audit pool accounting"
+      ],
+      "discriminator": [
+        31,
+        234,
+        130,
+        0,
+        221,
+        80,
+        83,
+        220
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "docs": [
+            "Pool to verify (immutable - read-only verification)."
+          ]
+        },
+        {
+          "name": "baseVault",
+          "docs": [
+            "Pool's base vault (immutable - read-only verification)."
+          ]
+        },
+        {
+          "name": "quoteVault",
+          "docs": [
+            "Pool's quote vault (immutable - read-only verification)."
+          ]
+        },
+        {
+          "name": "verifier",
+          "docs": [
+            "Admin or any authorized party that triggers verification.",
+            "Does not need to be admin - anyone can verify accounting."
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "viewFarmingPosition",
       "docs": [
         "View farming position analytics (read-only).",
@@ -3195,6 +3261,19 @@ export type OrbitFinance = {
         103,
         90,
         105
+      ]
+    },
+    {
+      "name": "poolAccountingVerified",
+      "discriminator": [
+        191,
+        132,
+        206,
+        125,
+        68,
+        125,
+        202,
+        59
       ]
     },
     {
@@ -5095,6 +5174,53 @@ export type OrbitFinance = {
                 2
               ]
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "poolAccountingVerified",
+      "docs": [
+        "Event emitted when pool accounting is verified."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "baseVaultBalance",
+            "type": "u64"
+          },
+          {
+            "name": "quoteVaultBalance",
+            "type": "u64"
+          },
+          {
+            "name": "binBaseTotal",
+            "type": "u128"
+          },
+          {
+            "name": "binQuoteTotal",
+            "type": "u128"
+          },
+          {
+            "name": "baseDrift",
+            "type": "i128"
+          },
+          {
+            "name": "quoteDrift",
+            "type": "i128"
+          },
+          {
+            "name": "verifiedBy",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
           }
         ]
       }

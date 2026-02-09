@@ -1,5 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
-import { AccountLayout } from "@solana/spl-token";
+import { AccountLayout, MintLayout, getAssociatedTokenAddress } from "@solana/spl-token";
 import { PROGRAM_ID, connection, pk } from "../solana.js";
 import { safeNumber } from "../utils/http.js";
 import { deriveBinPda } from "../utils/pda.js";
@@ -16,6 +16,7 @@ export type PoolView = {
   priceNumber: number | null;
   baseVault: string;
   quoteVault: string;
+  lpMint: string;
   creatorFeeVault: string | null;
   holdersFeeVault: string | null;
   nftFeeVault: string | null;
@@ -27,6 +28,14 @@ export type PoolView = {
   pausedBits: number;
   binStepBps: number;
   baseFeeBps: number;
+};
+
+export type PoolCompleteView = PoolView & {
+  lpSupplyRaw: string;
+  escrowLpAta: string | null;
+  escrowLpRaw: string;
+  liquidityQuote: number;
+  tvlLockedQuote: number;
 };
 
 export type BinPoint = {
@@ -215,6 +224,7 @@ export async function readPool(pool: string): Promise<PoolView> {
   const quoteMintPk = asPk(pick(raw, ["quoteMint", "quote_mint"])!, "quote_mint");
   const baseVaultPk = asPk(pick(raw, ["baseVault", "base_vault"])!, "base_vault");
   const quoteVaultPk = asPk(pick(raw, ["quoteVault", "quote_vault"])!, "quote_vault");
+  const lpMintPk = asPk(pick(raw, ["lpMint", "lp_mint"])!, "lp_mint");
   const creatorFeeVaultPk = pick<any>(raw, ["creatorFeeVault", "creator_fee_vault"]);
   const holdersFeeVaultPk = pick<any>(raw, ["holdersFeeVault", "holders_fee_vault"]);
   const nftFeeVaultPk = pick<any>(raw, ["nftFeeVault", "nft_fee_vault"]);
@@ -277,6 +287,7 @@ export async function readPool(pool: string): Promise<PoolView> {
     priceNumber,
     baseVault: baseVaultPk.toBase58(),
     quoteVault: quoteVaultPk.toBase58(),
+    lpMint: lpMintPk.toBase58(),
     creatorFeeVault:
       creatorFeeVaultPk != null ? asPk(creatorFeeVaultPk, "creator_fee_vault").toBase58() : null,
     holdersFeeVault:
@@ -291,6 +302,90 @@ export async function readPool(pool: string): Promise<PoolView> {
     pausedBits: pauseBits,
     binStepBps,
     baseFeeBps,
+  };
+}
+
+/**
+ * Read complete pool data including LP supply, escrow, and liquidity calculations.
+ * This is used for pool registration to populate all database fields.
+ */
+export async function readPoolComplete(pool: string): Promise<PoolCompleteView> {
+  const poolView = await readPool(pool);
+  const poolPk = pk(pool);
+  const lpMintPk = pk(poolView.lpMint);
+  const baseVaultPk = pk(poolView.baseVault);
+  const quoteVaultPk = pk(poolView.quoteVault);
+
+  // Derive escrow LP ATA (pool's own LP token account)
+  const escrowLpAta = await getAssociatedTokenAddress(lpMintPk, poolPk, true);
+
+  // Fetch LP mint supply, vault balances, and escrow balance in parallel
+  const [lpMintInfo, baseVaultInfo, quoteVaultInfo, escrowInfo] = await Promise.all([
+    connection.getAccountInfo(lpMintPk, "confirmed"),
+    connection.getAccountInfo(baseVaultPk, "confirmed"),
+    connection.getAccountInfo(quoteVaultPk, "confirmed"),
+    connection.getAccountInfo(escrowLpAta, "confirmed"),
+  ]);
+
+  // Parse LP mint supply
+  let lpSupplyRaw = "0";
+  if (lpMintInfo?.data && lpMintInfo.data.length >= MintLayout.span) {
+    try {
+      const mintData = MintLayout.decode(lpMintInfo.data);
+      lpSupplyRaw = mintData.supply.toString();
+    } catch {
+      lpSupplyRaw = "0";
+    }
+  }
+
+  // Parse vault balances
+  const getTokenBalance = (accountInfo: any): bigint => {
+    if (!accountInfo?.data || accountInfo.data.length < 72) return 0n;
+    const buffer = Buffer.from(accountInfo.data);
+    return buffer.readBigUInt64LE(64);
+  };
+
+  const baseVaultRaw = getTokenBalance(baseVaultInfo);
+  const quoteVaultRaw = getTokenBalance(quoteVaultInfo);
+  const escrowLpRaw = getTokenBalance(escrowInfo);
+
+  // Convert to UI amounts
+  const toUiAmount = (raw: bigint, decimals: number): number => {
+    try {
+      const denom = 10 ** decimals;
+      const ui = Number(raw) / denom;
+      return Number.isFinite(ui) ? ui : 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const baseVaultUi = toUiAmount(baseVaultRaw, poolView.baseDecimals);
+  const quoteVaultUi = toUiAmount(quoteVaultRaw, poolView.quoteDecimals);
+
+  // Calculate liquidity_quote using pool price
+  // liquidity_quote = quoteVault + baseVault * price (in quote units)
+  let liquidityQuote = quoteVaultUi;
+  if (poolView.priceNumber != null && Number.isFinite(poolView.priceNumber) && poolView.priceNumber > 0) {
+    liquidityQuote = quoteVaultUi + baseVaultUi * poolView.priceNumber;
+  }
+
+  // Calculate tvl_locked_quote from escrow LP share
+  // locked_share = escrow_lp / total_lp_supply
+  const lpMintDecimals = 6; // Standard LP mint decimals
+  const totalLpUi = toUiAmount(BigInt(lpSupplyRaw), lpMintDecimals);
+  const escrowLpUi = toUiAmount(escrowLpRaw, lpMintDecimals);
+
+  const lockedShare = totalLpUi > 0 ? Math.max(0, Math.min(1, escrowLpUi / totalLpUi)) : 0;
+  const tvlLockedQuote = liquidityQuote * lockedShare;
+
+  return {
+    ...poolView,
+    lpSupplyRaw,
+    escrowLpAta: escrowLpAta.toBase58(),
+    escrowLpRaw: escrowLpRaw.toString(),
+    liquidityQuote,
+    tvlLockedQuote,
   };
 }
 

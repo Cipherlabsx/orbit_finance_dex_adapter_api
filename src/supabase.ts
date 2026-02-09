@@ -41,12 +41,19 @@ export async function upsertDexPool(p: {
   quoteDecimals: number;
   baseVault?: string;
   quoteVault?: string;
+  lpMint?: string;
   admin?: string;
   baseFeeBps?: number;
   binStepBps?: number;
   activeBin?: number;
   initialBin?: number;
   pausedBits?: number;
+  lastPriceQuotePerBase?: number | null;
+  escrowLpAta?: string | null;
+  escrowLpRaw?: string | null;
+  lpSupplyRaw?: string | null;
+  liquidityQuote?: number | null;
+  tvlLockedQuote?: number | null;
   creatorFeeVault?: string | null;
   holdersFeeVault?: string | null;
   nftFeeVault?: string | null;
@@ -64,12 +71,25 @@ export async function upsertDexPool(p: {
   // Add optional fields if provided
   if (p.baseVault !== undefined) row.base_vault = p.baseVault;
   if (p.quoteVault !== undefined) row.quote_vault = p.quoteVault;
+  if (p.lpMint !== undefined) row.lp_mint = p.lpMint;
   if (p.admin !== undefined) row.admin = p.admin;
   if (p.baseFeeBps !== undefined) row.base_fee_bps = p.baseFeeBps;
   if (p.binStepBps !== undefined) row.bin_step_bps = p.binStepBps;
   if (p.activeBin !== undefined) row.active_bin = p.activeBin;
   if (p.initialBin !== undefined) row.initial_bin = p.initialBin;
   if (p.pausedBits !== undefined) row.paused_bits = p.pausedBits;
+  if (p.lastPriceQuotePerBase !== undefined && p.lastPriceQuotePerBase !== null && Number.isFinite(p.lastPriceQuotePerBase)) {
+    row.last_price_quote_per_base = p.lastPriceQuotePerBase;
+  }
+  if (p.escrowLpAta !== undefined) row.escrow_lp_ata = p.escrowLpAta;
+  if (p.escrowLpRaw !== undefined) row.escrow_lp_raw = p.escrowLpRaw;
+  if (p.lpSupplyRaw !== undefined) row.lp_supply_raw = p.lpSupplyRaw;
+  if (p.liquidityQuote !== undefined && p.liquidityQuote !== null && Number.isFinite(p.liquidityQuote)) {
+    row.liquidity_quote = p.liquidityQuote;
+  }
+  if (p.tvlLockedQuote !== undefined && p.tvlLockedQuote !== null && Number.isFinite(p.tvlLockedQuote)) {
+    row.tvl_locked_quote = p.tvlLockedQuote;
+  }
   if (p.creatorFeeVault !== undefined) row.creator_fee_vault = p.creatorFeeVault;
   if (p.holdersFeeVault !== undefined) row.holders_fee_vault = p.holdersFeeVault;
   if (p.nftFeeVault !== undefined) row.nft_fee_vault = p.nftFeeVault;

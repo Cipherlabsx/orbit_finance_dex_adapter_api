@@ -20,6 +20,7 @@ import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactio
 import { readPoolComplete } from "../services/pool_reader.js";
 import { upsertDexPool, supabase } from "../supabase.js";
 import { connection } from "../solana.js";
+import { refreshPoolBins } from "../services/pool_refresh.js";
 import {
   CreatePoolBatchRequestZ,
   CreatePoolRequestZ,
@@ -614,6 +615,58 @@ export async function v1Routes(app: FastifyInstance) {
       console.error("Pool registration error:", error);
       reply.code(500);
       return { error: "registration_failed", message: "Failed to register pool in database" };
+    }
+  });
+
+  /**
+   * POST /pool/refresh
+   *
+   * Refreshes pool bin data from on-chain to database
+   * Called after deposit/withdraw operations to keep database in sync
+   *
+   * Body: { pool: string }
+   */
+  app.post("/pool/refresh", async (req, reply) => {
+    try {
+      const body = z.object({
+        pool: z.string().min(32).max(44),
+      }).parse(req.body);
+
+      // Validate pool address
+      try {
+        new PublicKey(body.pool);
+      } catch {
+        reply.code(400);
+        return { error: "invalid_pool_address", message: "Pool address is not a valid Solana public key" };
+      }
+
+      // Refresh bins from on-chain
+      const result = await refreshPoolBins(connection, supabase, body.pool);
+
+      if (!result.success) {
+        reply.code(500);
+        return {
+          error: "refresh_failed",
+          message: result.error || "Failed to refresh pool data",
+          pool: body.pool,
+        };
+      }
+
+      reply.header("cache-control", "no-store");
+      return {
+        success: true,
+        pool: body.pool,
+        bins: result.bins,
+        binCount: result.bins ? result.bins.length : 0,
+        ts: Date.now(),
+      };
+    } catch (error) {
+      console.error("Pool refresh error:", error);
+      reply.code(500);
+      return {
+        error: "refresh_failed",
+        message: error instanceof Error ? error.message : String(error),
+      };
     }
   });
 

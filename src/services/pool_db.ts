@@ -93,6 +93,7 @@ export async function dbGetPool(pool: string) {
  * - slot-gated
  * - price ONLY written if non-null
  * - active_bin always written
+ * - liquidity fields optional (only updated if provided)
  */
 export async function dbUpdatePoolLiveState(args: {
   pool: string;
@@ -100,8 +101,23 @@ export async function dbUpdatePoolLiveState(args: {
   signature?: string | null;
   activeBin: number | null;
   lastPriceQuotePerBase: number | null;
+  // Optional liquidity fields (updated after withdraw/deposit events)
+  liquidityQuote?: number | null;
+  tvlLockedQuote?: number | null;
+  escrowLpRaw?: string | null;
+  lpSupplyRaw?: string | null;
 }) {
-  const { pool, slot, signature, activeBin, lastPriceQuotePerBase } = args;
+  const {
+    pool,
+    slot,
+    signature,
+    activeBin,
+    lastPriceQuotePerBase,
+    liquidityQuote,
+    tvlLockedQuote,
+    escrowLpRaw,
+    lpSupplyRaw,
+  } = args;
 
   // slot monotonicity guard
   const gate = `last_update_slot.is.null,last_update_slot.lt.${slot}`;
@@ -120,6 +136,23 @@ export async function dbUpdatePoolLiveState(args: {
     lastPriceQuotePerBase > 0
   ) {
     update.last_price_quote_per_base = lastPriceQuotePerBase;
+  }
+
+  // Update liquidity fields if provided
+  if (liquidityQuote != null && Number.isFinite(liquidityQuote)) {
+    update.liquidity_quote = liquidityQuote;
+  }
+
+  if (tvlLockedQuote != null && Number.isFinite(tvlLockedQuote)) {
+    update.tvl_locked_quote = tvlLockedQuote;
+  }
+
+  if (escrowLpRaw != null) {
+    update.escrow_lp_raw = escrowLpRaw;
+  }
+
+  if (lpSupplyRaw != null) {
+    update.lp_supply_raw = lpSupplyRaw;
   }
 
   const { error } = await supabase

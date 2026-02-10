@@ -815,9 +815,9 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   // CRITICAL FIX: Count bins that actually use each token
   // SECURITY FIX: Active bin is EXCLUDED from deposits (program forbids ActiveBinDepositForbidden)
-  // In DLMM: bins < activeBin get base, bins > activeBin get quote
-  const binsWithBase = activeBin - lowerBinIndex;   // Bins below active (exclusive)
-  const binsWithQuote = upperBinIndex - activeBin;  // Bins above active (exclusive)
+  // In DLMM: bins < activeBin get QUOTE (for BaseToQuote swaps), bins > activeBin get BASE (for QuoteToBase swaps)
+  const binsWithQuote = activeBin - lowerBinIndex;   // Bins below active (exclusive) - get QUOTE
+  const binsWithBase = upperBinIndex - activeBin;  // Bins above active (exclusive) - get BASE
 
   // Validate amounts are sufficient for distribution
   if (baseAmountRaw > 0n && baseAmountRaw < BigInt(binsWithBase)) {
@@ -863,24 +863,24 @@ export async function buildPoolCreationWithLiquidityTransactions(
     let binBaseAmount = 0n;
     let binQuoteAmount = 0n;
 
-    // Distribute base tokens to bins < activeBin (changed from <=)
-    if (binIndex < activeBin && baseShare > 0n) {
-      binBaseAmount = baseShare;
-      // Distribute remainder: first N bins get +1 atom each (N = remainder)
-      if (baseCounter < Number(baseRemainder)) {
-        binBaseAmount += 1n;
-      }
-      baseCounter++;
-    }
-
-    // Distribute quote tokens to bins > activeBin (changed from >=)
-    if (binIndex > activeBin && quoteShare > 0n) {
+    // Distribute QUOTE tokens to bins < activeBin (for BaseToQuote swaps - selling base for quote)
+    if (binIndex < activeBin && quoteShare > 0n) {
       binQuoteAmount = quoteShare;
       // Distribute remainder: first N bins get +1 atom each (N = remainder)
       if (quoteCounter < Number(quoteRemainder)) {
         binQuoteAmount += 1n;
       }
       quoteCounter++;
+    }
+
+    // Distribute BASE tokens to bins > activeBin (for QuoteToBase swaps - buying base with quote)
+    if (binIndex > activeBin && baseShare > 0n) {
+      binBaseAmount = baseShare;
+      // Distribute remainder: first N bins get +1 atom each (N = remainder)
+      if (baseCounter < Number(baseRemainder)) {
+        binBaseAmount += 1n;
+      }
+      baseCounter++;
     }
 
     // Only create deposit if at least one amount is non-zero
@@ -1690,8 +1690,9 @@ export async function buildPoolCreationBatchTransactions(
   const depositsRaw: Array<{ bin_index: number; base_in: bigint; quote_in: bigint; min_shares_out: bigint }> = [];
 
   // SECURITY FIX: Active bin is EXCLUDED from deposits (program forbids ActiveBinDepositForbidden)
-  const binsWithBase = activeBin - lowerBinIndex;   // Bins below active (exclusive)
-  const binsWithQuote = upperBinIndex - activeBin;  // Bins above active (exclusive)
+  // In DLMM: bins < activeBin get QUOTE (for BaseToQuote swaps), bins > activeBin get BASE (for QuoteToBase swaps)
+  const binsWithQuote = activeBin - lowerBinIndex;   // Bins below active (exclusive) - get QUOTE
+  const binsWithBase = upperBinIndex - activeBin;  // Bins above active (exclusive) - get BASE
 
   // Calculate per-bin shares and remainders
   const baseShare = binsWithBase > 0 ? baseAmountRaw / BigInt(binsWithBase) : 0n;
@@ -1702,8 +1703,8 @@ export async function buildPoolCreationBatchTransactions(
   console.log(`[POOL_CREATION_BATCH] Liquidity distribution:`);
   console.log(`  Total bins: ${totalBins}`);
   console.log(`  Active bin: ${activeBin} (EXCLUDED from deposits)`);
-  console.log(`  Bins with base: ${binsWithBase} (< active)`);
-  console.log(`  Bins with quote: ${binsWithQuote} (> active)`);
+  console.log(`  Bins with quote: ${binsWithQuote} (< active)`);
+  console.log(`  Bins with base: ${binsWithBase} (> active)`);
   console.log(`  Base: ${baseAmountRaw} atoms = ${baseShare}/bin + ${baseRemainder} remainder`);
   console.log(`  Quote: ${quoteAmountRaw} atoms = ${quoteShare}/bin + ${quoteRemainder} remainder`);
 
@@ -1723,22 +1724,22 @@ export async function buildPoolCreationBatchTransactions(
     let binBaseAmount = 0n;
     let binQuoteAmount = 0n;
 
-    // Distribute base to bins < activeBin (changed from <=)
-    if (binIndex < activeBin && baseShare > 0n) {
-      binBaseAmount = baseShare;
-      if (baseCounter < Number(baseRemainder)) {
-        binBaseAmount += 1n;
-      }
-      baseCounter++;
-    }
-
-    // Distribute quote to bins > activeBin (changed from >=)
-    if (binIndex > activeBin && quoteShare > 0n) {
+    // Distribute QUOTE to bins < activeBin (for BaseToQuote swaps - selling base for quote)
+    if (binIndex < activeBin && quoteShare > 0n) {
       binQuoteAmount = quoteShare;
       if (quoteCounter < Number(quoteRemainder)) {
         binQuoteAmount += 1n;
       }
       quoteCounter++;
+    }
+
+    // Distribute BASE to bins > activeBin (for QuoteToBase swaps - buying base with quote)
+    if (binIndex > activeBin && baseShare > 0n) {
+      binBaseAmount = baseShare;
+      if (baseCounter < Number(baseRemainder)) {
+        binBaseAmount += 1n;
+      }
+      baseCounter++;
     }
 
     if (binBaseAmount > 0n || binQuoteAmount > 0n) {

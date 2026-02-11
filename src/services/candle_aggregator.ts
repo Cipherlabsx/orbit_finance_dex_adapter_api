@@ -482,8 +482,9 @@ export function startCandleAggregator(opts: {
         lastFlush = now;
         await flushCandlesToDb(candleStore);
       }
-    } catch {
-      // keep loop alive
+    } catch (e) {
+      console.error(`[CANDLE_AGG] Error in tick loop:`, e);
+      // keep loop alive but log the error
     } finally {
       if (!stopped) setTimeout(tick, tickMs);
     }

@@ -313,8 +313,9 @@ export function startVolumeAggregator(opts: {
         lastFlush = now;
         await flushToDb(volumeStore);
       }
-    } catch {
-      // keep alive
+    } catch (e) {
+      console.error(`[VOLUME_AGG] Error in tick loop:`, e);
+      // keep alive but log the error
     } finally {
       if (!stopped) setTimeout(tick, tickMs);
     }

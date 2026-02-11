@@ -232,4 +232,37 @@ export async function updateDexPoolLiquidityState(args: {
   if (error) {
     throw new Error(`updateDexPoolLiquidityState failed: ${error.message}`);
   }
+
+  console.log(`[SUPABASE] Updated liquidity_quote for ${pool} to ${liquidityQuote} at slot ${slot}`);
+}
+
+/**
+ * Update pool's locked TVL when LiquidityLocked event occurs
+ */
+export async function updateDexPoolTvlLocked(params: {
+  pool: string;
+  slot: number;
+  tvlLockedQuote: number;
+}): Promise<void> {
+  const { pool, slot, tvlLockedQuote } = params;
+
+  // Slot-gating: only update if slot is newer than latest_liq_event_slot
+  const gate = `latest_liq_event_slot.is.null,latest_liq_event_slot.lt.${slot}`;
+
+  const { error } = await supabase
+    .from("dex_pools")
+    .update({
+      tvl_locked_quote: tvlLockedQuote,
+      latest_liq_event_slot: slot,
+      updated_at: nowIso(),
+    })
+    .eq("pool", pool)
+    .or(gate);
+
+  if (error) {
+    console.error(`[SUPABASE] Failed to update TVL locked for ${pool}:`, error);
+    throw new Error(`updateDexPoolTvlLocked failed: ${error.message}`);
+  }
+
+  console.log(`[SUPABASE] Updated tvl_locked_quote for ${pool} to ${tvlLockedQuote} at slot ${slot}`);
 }

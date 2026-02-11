@@ -235,7 +235,9 @@ export function onNewTradeForFees(opts: {
         feesStore.timers.delete(pool);
         try {
           await refreshFeesForPool(feesStore, pool);
-        } catch {}
+        } catch (err) {
+          console.error(`[FEES_AGG] Failed to refresh fees for ${pool}:`, err);
+        }
       }, wait);
       feesStore.timers.set(pool, t);
     }
@@ -250,7 +252,9 @@ export function onNewTradeForFees(opts: {
     feesStore.timers.delete(pool);
     try {
       await refreshFeesForPool(feesStore, pool);
-    } catch {}
+    } catch (err) {
+      console.error(`[FEES_AGG] Failed to refresh fees for ${pool}:`, err);
+    }
   }, debounceMs);
 
   feesStore.timers.set(pool, t);

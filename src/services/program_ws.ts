@@ -7,9 +7,11 @@ import { decodeEventsFromLogs } from "../idl/coder.js";
 import {
   updateDexPoolLiveState,
   updateDexPoolLiquidityState,
+  updateDexPoolTvlLocked,
   upsertDexPool,
   writeDexEvent,
   writeDexTrade,
+  supabase,
 } from "../supabase.js";
 import type { WsHub } from "./ws.js";
 import { formatEventData, getStandardEventType } from "./event_formatters.js";
@@ -232,10 +234,15 @@ export function startProgramLogStream(params: {
             commitment: "confirmed",
             maxSupportedTransactionVersion: 0,
           });
-        } catch {
+          if (!tx) {
+            console.warn(`[PROGRAM_WS] Transaction not found: ${sig}`);
+            return;
+          }
+        } catch (err) {
+          console.error(`[PROGRAM_WS] Failed to fetch transaction ${sig}:`, err);
           return;
         }
-        if (!tx || tx.meta?.err) return;
+        if (tx.meta?.err) return;
 
         const logs = tx.meta?.logMessages ?? [];
         const slot = tx.slot ?? null;
@@ -291,7 +298,55 @@ export function startProgramLogStream(params: {
           if (evtPool && slot != null && poolView && LIQ_EVENT_NAMES.has(evt.name)) {
             const liq = computeLiquidityQuoteFromPostBalances({ tx, poolView });
             if (liq != null) {
-              await updateDexPoolLiquidityState({ pool: evtPool, slot, liquidityQuote: liq });
+              try {
+                await updateDexPoolLiquidityState({ pool: evtPool, slot, liquidityQuote: liq });
+                console.log(`[PROGRAM_WS] Updated liquidity for ${evtPool}: ${liq}`);
+              } catch (err) {
+                console.error(`[PROGRAM_WS] FAILED to update liquidity for ${evtPool}:`, err);
+                // Don't throw - keep processing other events
+              }
+            } else {
+              console.warn(`[PROGRAM_WS] Could not compute liquidity for ${evtPool} in slot ${slot}`);
+            }
+          }
+
+          // Handle LiquidityLocked events for tvl_locked_quote
+          if (evtPool && slot != null && evt.name === "LiquidityLocked") {
+            const lockData = evt.data as any;
+            const lpLocked = lockData?.lpLocked || lockData?.amount;
+
+            if (lpLocked && poolView) {
+              try {
+                // Compute locked LP as quote-equivalent using current pool liquidity
+                const liq = computeLiquidityQuoteFromPostBalances({ tx, poolView });
+                if (liq != null) {
+                  await updateDexPoolTvlLocked({ pool: evtPool, slot, tvlLockedQuote: liq });
+                  console.log(`[PROGRAM_WS] Updated TVL locked for ${evtPool}: ${liq}`);
+                }
+              } catch (err) {
+                console.error(`[PROGRAM_WS] Failed to update TVL locked for ${evtPool}:`, err);
+              }
+            }
+          }
+
+          // Handle FeeConfigUpdated events
+          if (evtPool && evt.name === "FeeConfigUpdated") {
+            const configData = evt.data as any;
+            const baseFeeBps = configData?.baseFeeBps;
+
+            if (baseFeeBps != null) {
+              try {
+                await supabase
+                  .from("dex_pools")
+                  .update({
+                    base_fee_bps: baseFeeBps,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq("pool", evtPool);
+                console.log(`[PROGRAM_WS] Updated fee config for ${evtPool}: ${baseFeeBps} bps`);
+              } catch (err) {
+                console.error(`[PROGRAM_WS] Failed to update fee config for ${evtPool}:`, err);
+              }
             }
           }
 

@@ -164,6 +164,33 @@ export const CreatePoolRequestZ = z
 export type CreatePoolRequest = z.infer<typeof CreatePoolRequestZ>;
 
 /**
+ * Distribution strategy for liquidity allocation
+ * Controls how liquidity is distributed across bins
+ */
+export const DistributionStrategyZ = z.enum([
+  "uniform",       // Equal weight across all bins
+  "concentrated",  // Bell curve centered around active bin
+  "skew_bid",      // More liquidity on bid (lower price) side
+  "skew_ask",      // More liquidity on ask (higher price) side
+  "bid-ask",       // U-shaped curve (high edges, low center)
+  "curve",         // Wide bell curve
+  "custom"         // User-defined curve
+]);
+
+export type DistributionStrategy = z.infer<typeof DistributionStrategyZ>;
+
+/**
+ * Distribution configuration
+ * Optional - defaults to uniform distribution for backward compatibility
+ */
+export const DistributionConfigZ = z.object({
+  strategy: DistributionStrategyZ.optional().default("uniform"),
+  decay: z.number().min(0).max(1).optional().default(0.4), // For concentrated/skew strategies
+});
+
+export type DistributionConfig = z.infer<typeof DistributionConfigZ>;
+
+/**
  * POST /api/v1/pool/create-batch request schema (BATCHED FLOW - NEW)
  *
  * Same as CreatePoolRequestZ but enforces liquidity parameters
@@ -189,6 +216,9 @@ export const CreatePoolBatchRequestZ = z
     quoteAmount: PositiveDecimalStringZ,
     binsLeft: z.number().int().min(0).max(200),
     binsRight: z.number().int().min(0).max(200),
+
+    // Distribution strategy (OPTIONAL - defaults to uniform)
+    distribution: DistributionConfigZ.optional(),
 
     // Token decimals
     baseDecimals: z.number().int().min(0).max(18),

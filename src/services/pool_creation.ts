@@ -2,7 +2,7 @@
  * Pool Creation Service
  *
  * Builds unsigned transactions for creating new liquidity pools.
- * Follows Orbit Finance DLMM program IDL for init_pool (merged with vault creation).
+ * Orbit Finance DLMM program IDL for init_pool (merged with vault creation).
  *
  * OPTIMIZATION: init_pool and init_pool_vaults merged into single instruction (saves 1 tx).
  *
@@ -26,6 +26,12 @@ const { BorshCoder } = anchorPkg;
 import BN from "bn.js";
 import { ORBIT_IDL } from "../idl/coder.js";
 import { PROGRAM_ID } from "../solana.js";
+import {
+  calculateDistributionWeights,
+  allocateToBins,
+  validateDistribution,
+} from "./distribution.js";
+import type { DistributionConfig } from "../schemas/pool_creation.js";
 
 /**
  * SPL Memo program ID for adding human-readable descriptions to transactions
@@ -75,6 +81,7 @@ export type PoolCreationWithLiquidityParams = PoolCreationParams & {
   quoteAmount: string;           // Quote token amount to deposit (in UI units)
   binsLeft: number;              // Number of bins to the left of active bin
   binsRight: number;             // Number of bins to the right of active bin
+  distribution?: DistributionConfig; // Distribution strategy (optional - defaults to uniform)
 };
 
 /**
@@ -118,12 +125,12 @@ const ALLOWED_BIN_STEPS = [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 10
  * WARNING: This function is for encoding bin_index in instruction data where
  * the Rust program stores it as u64. DO NOT use this for PDA derivation!
  *
- * - PDA derivation: Uses i32 (4 bytes) → use derivePositionBinPda() function
- * - Instruction data: Uses u64 (8 bytes) → use this function
+ * - PDA derivation: Uses i32 (4 bytes) -> use derivePositionBinPda() function
+ * - Instruction data: Uses u64 (8 bytes) -> use this function
  *
  * Matches Rust's canonical encoding: (bin_index as i64) as u64
  * This performs 64-bit sign extension for negative values, NOT 32-bit two's complement.
- * Example: -1224 → 0xFFFFFFFFFFFFFB38 (18446744073709550392)
+ * Example: -1224 -> 0xFFFFFFFFFFFFFB38 (18446744073709550392)
  *
  * @param binIndexSigned - Signed bin index (i32 range: -2147483648 to 2147483647)
  * @returns Canonical u64 encoding (64-bit sign extension) for instruction data
@@ -226,15 +233,6 @@ function calculatePriceQ64_64(
  */
 /**
  * Derive pool PDA (Program Derived Address)
- *
- * CRITICAL: Pool address includes BOTH bin_step_bps AND base_fee_bps to allow multiple pools
- * per token pair with different configurations:
- * - bin_step_bps: Price granularity (1-400 bps) - tighter spreads vs wider ranges
- * - base_fee_bps: Swap fee tier (e.g., 5 = 0.05%, 30 = 0.30%, 100 = 1.00%)
- *
- * This enables multi-tier pools: same token pair can have multiple fee tiers
- * (e.g., USDC/SOL with 0.05% fees for high volume, 0.30% fees for retail).
- *
  * @param baseMint - Base token mint address
  * @param quoteMint - Quote token mint address
  * @param binStepBps - Bin step in basis points (determines price granularity)
@@ -272,7 +270,7 @@ function derivePoolPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: nu
 /**
  * Derives registry PDA (prevents duplicate pools)
  * Seeds: ["registry", baseMint, quoteMint, binStepBps, baseFeeBps]
- * CRITICAL: Each pool (unique base + quote + bin step + base fee) has its own registry
+ * Each pool (unique base + quote + bin step + base fee) has its own registry
  * Allows multiple pools per token pair with different fee tiers
  */
 function deriveRegistryPda(baseMint: PublicKey, quoteMint: PublicKey, binStepBps: number, baseFeeBps: number): [PublicKey, number] {
@@ -392,7 +390,7 @@ function serializeInstruction(ix: TransactionInstruction): SerializedInstruction
 }
 
 /**
- * Builds pool creation transaction (OPTIMIZED: merged init_pool + init_pool_vaults)
+ * Builds pool creation transaction (merged init_pool + init_pool_vaults)
  *
  * Returns 1 transaction:
  * 1. init_pool: Creates pool state, LP mint, registry, and all 6 token vaults (merged)
@@ -436,7 +434,7 @@ export async function buildPoolCreationTransactions(
   validateFeeConfig(feeConfig);
 
   // SECURITY FIX: Only BinArray mode (1) is supported, enforce strictly
-  // Mode 0 may be for legacy/testing purposes and should not be used in production
+  // Mode 0 may be for legacy/testing purposes and are not be used in production
   if (accountingMode !== 1) {
     throw new Error(`accountingMode must be 1 (BinArray), got ${accountingMode}`);
   }
@@ -680,7 +678,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   console.log(`  - Already exist: ${binArrayIndices.length - binArrayIndicesToCreate.length}`);
   console.log(`  - To create: ${binArrayIndicesToCreate.length}`);
   if (binArrayIndicesToCreate.length === 0 && binArrayIndices.length > 0) {
-    console.warn(`[POOL_CREATION] ⚠️  WARNING: All BinArrays reported as existing! This might be incorrect.`);
+    console.warn(`[POOL_CREATION] WARNING: All BinArrays reported as existing! This might be incorrect.`);
   }
 
   // Build create_bin_array instructions and batch them
@@ -775,7 +773,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
   // Convert amounts to raw (atoms)
   // SECURITY FIX: Validate amounts are finite before BigInt conversion to prevent RangeError crash
-  // parseFloat("1e308") * 10^6 = Infinity → BigInt(Infinity) throws RangeError
+  // parseFloat("1e308") * 10^6 = Infinity -> BigInt(Infinity) throws RangeError
   const baseFloat = parseFloat(baseAmount);
   const quoteFloat = parseFloat(quoteAmount);
 
@@ -958,7 +956,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
       // SECURITY FIX: Limit number of position bins to prevent DOS attacks
       // Attacker could create position with 10,000+ bins and trigger massive RPC response
-      const MAX_POSITION_BINS = 1000;
+      const MAX_POSITION_BINS = 1280;
       if (existingPositionBins.length > MAX_POSITION_BINS) {
         throw new Error(
           `Position has too many bins (${existingPositionBins.length}). ` +
@@ -1051,7 +1049,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
       }
 
       if (orphanedBins.length > 0) {
-        console.warn(`[POOL_CREATION] ⚠️  CRITICAL: Found ${orphanedBins.length} bins with orphaned liquidity!`);
+        console.warn(`[POOL_CREATION] CRITICAL: Found ${orphanedBins.length} bins with orphaned liquidity!`);
         console.warn(`[POOL_CREATION] This pool is in a BROKEN STATE (BinArrays have liquidity but no PositionBins)`);
         console.warn(`[POOL_CREATION] Adding orphaned bins to existing bins list for auto-repair...`);
 
@@ -1068,7 +1066,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
 
         // CRITICAL: Also add orphaned bins to binIndicesToCreate so PositionBins get created
         // This auto-repairs the broken state by creating missing PositionBins
-        console.log(`[POOL_CREATION] 🔧 AUTO-REPAIR: Adding ${orphanedBins.length} orphaned bins to PositionBin creation queue...`);
+        console.log(`[POOL_CREATION] AUTO-REPAIR: Adding ${orphanedBins.length} orphaned bins to PositionBin creation queue...`);
 
         for (const binIndex of orphanedBins) {
           // Only add if not already in the list
@@ -1080,7 +1078,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
         // Sort for consistent ordering
         binIndicesToCreate.sort((a, b) => a - b);
 
-        console.log(`[POOL_CREATION] 🔧 AUTO-REPAIR: Will create ${binIndicesToCreate.length} total PositionBins (${orphanedBins.length} for orphaned liquidity)`);
+        console.log(`[POOL_CREATION] AUTO-REPAIR: Will create ${binIndicesToCreate.length} total PositionBins (${orphanedBins.length} for orphaned liquidity)`);
       } else {
         console.log("[POOL_CREATION] No orphaned liquidity found. Pool is clean.");
       }
@@ -1125,7 +1123,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
         continue;
       }
 
-      // Pick first bin as representative (Rust program deduplicates BinArrays in HashMap)
+      // Pick first bin as representative (our program deduplicates BinArrays in HashMap)
       const representativeBin = bins[0];
 
       referenceDeposits.push({
@@ -1175,7 +1173,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
     throw new Error(`Position bin creation bug: ${missingBins.length} bins missing`);
   }
 
-  console.log(`[POOL_CREATION] ✅ All ${allDepositsForPositionBinCreation.length} deposit bins will have position bins created`);
+  console.log(`[POOL_CREATION] All ${allDepositsForPositionBinCreation.length} deposit bins will have position bins created`);
 
   // Batch init_position_bin instructions to avoid transaction size limit
   // Each init_position_bin instruction is ~150 bytes
@@ -1235,7 +1233,7 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const allDeposits = allDepositsForPositionBinCreation;
 
   // IMPORTANT: Split deposits into batches to avoid transaction size limit
-  // Solana tx limit: 1232 bytes serialized
+  // Sol tx limit: 1232 bytes serialized
   // Calculation: ~300 bytes overhead + 100 bytes compute budget + (34 bytes × deposits)
   // With compute budget: 400 + (34 × deposits) must be < 1232
   // Max safe: (1232 - 400) / 34 = ~24, but using 4 for extra safety margin
@@ -1547,19 +1545,12 @@ function priceToActiveBin(priceQ64_64: bigint, binStepBps: number): number {
  * - NO separate init_position_bins transactions (lazy creation during add_liquidity_batch)
  * - Single add_liquidity_batch instruction handles ALL account creation + liquidity deposit
  *
- * # Benefits:
- * - 98% fewer transactions (150 → 2-7)
- * - Atomic operation (all-or-nothing)
- * - Much better UX (less signing)
- * - Lower gas costs
- * - Competitive transaction efficiency
- *
  * # Limits:
  * - Max 32 bins per add_liquidity_batch transaction (transaction size limit)
  * - For >32 bins, automatically splits into multiple batches (2-7 transactions total)
  *
  * @param params - Pool creation parameters with liquidity distribution
- * @param connection - Solana RPC connection
+ * @param connection - RPC connection
  * @returns Pool creation result with init_pool + add_liquidity_batch transactions
  */
 export async function buildPoolCreationBatchTransactions(
@@ -1589,7 +1580,7 @@ export async function buildPoolCreationBatchTransactions(
     priorityLevel = "turbo",
   } = params;
 
-  // 1. Build init_pool transaction (same as regular flow)
+  // Build init_pool transaction (same as regular flow)
   const baseResult = await buildPoolCreationTransactions(params);
 
   const adminPk = new PublicKey(admin);
@@ -1653,7 +1644,7 @@ export async function buildPoolCreationBatchTransactions(
 
   // Convert amounts to raw (atoms)
   // SECURITY FIX: Validate amounts are finite before BigInt conversion to prevent RangeError crash
-  // parseFloat("1e308") * 10^6 = Infinity → BigInt(Infinity) throws RangeError
+  // parseFloat("1e308") * 10^6 = Infinity -> BigInt(Infinity) throws RangeError
   const baseFloat = parseFloat(baseAmount);
   const quoteFloat = parseFloat(quoteAmount);
 
@@ -1686,83 +1677,71 @@ export async function buildPoolCreationBatchTransactions(
     throw new Error(`quoteAmount exceeds u64 maximum: ${quoteAmountRaw}`);
   }
 
-  // Build deposits array - distribute evenly across bins
+  // Build deposits array - use distribution strategy
   const depositsRaw: Array<{ bin_index: number; base_in: bigint; quote_in: bigint; min_shares_out: bigint }> = [];
 
-  // SECURITY FIX: Active bin is EXCLUDED from deposits (program forbids ActiveBinDepositForbidden)
-  // In DLMM: bins < activeBin get QUOTE (for BaseToQuote swaps), bins > activeBin get BASE (for QuoteToBase swaps)
-  const binsWithQuote = activeBin - lowerBinIndex;   // Bins below active (exclusive) - get QUOTE
-  const binsWithBase = upperBinIndex - activeBin;  // Bins above active (exclusive) - get BASE
+  // Calculate distribution weights based on strategy
+  // totalBins already defined above (line 1649)
+  const distributionConfig = params.distribution ?? { strategy: "uniform", decay: 0.4 };
+  const strategy = distributionConfig.strategy ?? "uniform";
 
-  // Calculate per-bin shares and remainders
-  const baseShare = binsWithBase > 0 ? baseAmountRaw / BigInt(binsWithBase) : 0n;
-  const quoteShare = binsWithQuote > 0 ? quoteAmountRaw / BigInt(binsWithQuote) : 0n;
-  const baseRemainder = binsWithBase > 0 ? baseAmountRaw % BigInt(binsWithBase) : 0n;
-  const quoteRemainder = binsWithQuote > 0 ? quoteAmountRaw % BigInt(binsWithQuote) : 0n;
+  console.log(`[POOL_CREATION_BATCH] Distribution strategy: ${strategy}`);
+  console.log(`[POOL_CREATION_BATCH] Total bins: ${totalBins} (${lowerBinIndex} to ${upperBinIndex})`);
+  console.log(`[POOL_CREATION_BATCH] Active bin: ${activeBin} (EXCLUDED from deposits)`);
 
-  console.log(`[POOL_CREATION_BATCH] Liquidity distribution:`);
-  console.log(`  Total bins: ${totalBins}`);
-  console.log(`  Active bin: ${activeBin} (EXCLUDED from deposits)`);
-  console.log(`  Bins with quote: ${binsWithQuote} (< active)`);
-  console.log(`  Bins with base: ${binsWithBase} (> active)`);
-  console.log(`  Base: ${baseAmountRaw} atoms = ${baseShare}/bin + ${baseRemainder} remainder`);
-  console.log(`  Quote: ${quoteAmountRaw} atoms = ${quoteShare}/bin + ${quoteRemainder} remainder`);
+  // Calculate weights for all bins (including active)
+  const allWeights = calculateDistributionWeights(
+    strategy,
+    totalBins,
+    distributionConfig.decay ?? 0.4
+  );
 
-  // Distribute liquidity
-  let baseCounter = 0;
-  let quoteCounter = 0;
-
+  // Generate bin indices (EXCLUDING active bin - deposits forbidden)
+  const binIndices: number[] = [];
   for (let binIndex = lowerBinIndex; binIndex <= upperBinIndex; binIndex++) {
-    // CRITICAL FIX: Skip active bin entirely
-    // Rust program forbids deposits into active bin (ActiveBinDepositForbidden)
-    // Active bin should only have MM liquidity, not LP liquidity
-    if (binIndex === activeBin) {
-      console.log(`[POOL_CREATION_BATCH] Skipping active bin ${activeBin} (deposits forbidden by program)`);
-      continue;
-    }
-
-    let binBaseAmount = 0n;
-    let binQuoteAmount = 0n;
-
-    // Distribute QUOTE to bins < activeBin (for BaseToQuote swaps - selling base for quote)
-    if (binIndex < activeBin && quoteShare > 0n) {
-      binQuoteAmount = quoteShare;
-      if (quoteCounter < Number(quoteRemainder)) {
-        binQuoteAmount += 1n;
-      }
-      quoteCounter++;
-    }
-
-    // Distribute BASE to bins > activeBin (for QuoteToBase swaps - buying base with quote)
-    if (binIndex > activeBin && baseShare > 0n) {
-      binBaseAmount = baseShare;
-      if (baseCounter < Number(baseRemainder)) {
-        binBaseAmount += 1n;
-      }
-      baseCounter++;
-    }
-
-    if (binBaseAmount > 0n || binQuoteAmount > 0n) {
-      depositsRaw.push({
-        bin_index: binIndex,
-        base_in: binBaseAmount,
-        quote_in: binQuoteAmount,
-        min_shares_out: 0n, // No slippage protection for pool creation (bootstrap)
-      });
+    if (binIndex !== activeBin) {
+      binIndices.push(binIndex);
     }
   }
 
-  // Verify distribution
-  const totalBaseDistributed = depositsRaw.reduce((sum, d) => sum + d.base_in, 0n);
-  const totalQuoteDistributed = depositsRaw.reduce((sum, d) => sum + d.quote_in, 0n);
+  // Filter weights for non-active bins
+  const activeOffset = activeBin - lowerBinIndex;
+  const weights = allWeights.filter((_, i) => i !== activeOffset);
 
-  if (totalBaseDistributed !== baseAmountRaw || totalQuoteDistributed !== quoteAmountRaw) {
-    throw new Error(
-      `Distribution mismatch! Base: ${totalBaseDistributed}/${baseAmountRaw}, Quote: ${totalQuoteDistributed}/${quoteAmountRaw}`
-    );
+  console.log(`[POOL_CREATION_BATCH] Non-active bins: ${binIndices.length}`);
+  console.log(`[POOL_CREATION_BATCH] Weights (first 5): ${weights.slice(0, 5).map(w => w.toFixed(4)).join(", ")}...`);
+
+  // Step 4: Allocate amounts to bins using weights
+  const allocations = allocateToBins(
+    binIndices,
+    weights,
+    baseAmountRaw,
+    quoteAmountRaw,
+    activeBin
+  );
+
+  // Validate distribution (filters zero-atom bins, verifies sums)
+  const validation = validateDistribution(allocations, baseAmountRaw, quoteAmountRaw);
+
+  if (!validation.valid) {
+    throw new Error(`Distribution validation failed: ${validation.errors.join(", ")}`);
   }
 
-  console.log(`[POOL_CREATION_BATCH] ✓ Distribution verified: ${depositsRaw.length} deposits`);
+  if (validation.warnings.length > 0) {
+    console.warn(`[POOL_CREATION_BATCH] Distribution warnings:`, validation.warnings);
+  }
+
+  // Build deposits array from validated allocations
+  for (const allocation of validation.deposits) {
+    depositsRaw.push({
+      bin_index: allocation.binIndex,
+      base_in: allocation.baseAtoms,
+      quote_in: allocation.quoteAtoms,
+      min_shares_out: 0n, // No slippage protection for pool creation (bootstrap)
+    });
+  }
+
+  console.log(`[POOL_CREATION_BATCH] ✓ Distribution complete: ${depositsRaw.length} deposits (strategy: ${strategy})`);
 
   // Derive accounts
   const positionNonce = BigInt(0);
@@ -1783,7 +1762,7 @@ export async function buildPoolCreationBatchTransactions(
   );
 
   // Build add_liquidity_batch transactions
-  // CRITICAL: Solana transaction size limit is 1232 bytes
+  // CRITICAL: Sol transaction size limit is 1232 bytes
   // Actual size calculation per transaction:
   // - Base instruction accounts: 10 accounts × 34 bytes = 340 bytes
   // - Compute budget + Memo: ~150 bytes
@@ -1791,7 +1770,7 @@ export async function buildPoolCreationBatchTransactions(
   // - Remaining accounts: N bins × 2 accounts × 34 bytes = N × 68 bytes
   // - Total per bin: 32 + 68 = 100 bytes
   // - Safe budget: 1232 - 490 (base) = 742 bytes
-  // - Max bins: 742 / 100 = 7.4 → 7 bins (conservative)
+  // - Max bins: 742 / 100 = 7.4 -> 7 bins (conservative)
   //
   // Using 8 bins for balance between transaction count and safety:
   // 8 bins = 490 + (8 × 100) = 1290 bytes (needs verification but close to limit)
@@ -1817,8 +1796,8 @@ export async function buildPoolCreationBatchTransactions(
       const binIndexI32 = deposit.bin_index;
       // SECURITY FIX: Use Math.floor (rounds towards -∞) for correct bin array boundaries
       // Rust uses BinArray::lower_bin_index_from() which implements floor division
-      // For negative bins: -1328 → floor(-1328/64) = -21 → -21*64 = -1344 (correct)
-      // Math.trunc would give: -1328 → trunc(-1328/64) = -20 → -20*64 = -1280 (WRONG!)
+      // For negative bins: -1328 -> floor(-1328/64) = -21 -> -21*64 = -1344 (correct)
+      // Math.trunc would give: -1328 -> trunc(-1328/64) = -20 -> -20*64 = -1280 (WRONG!)
       const lowerBinIdx = Math.floor(binIndexI32 / 64) * 64;
 
       const [binArrayPda] = deriveBinArrayPda(poolPda, lowerBinIdx);
@@ -1953,7 +1932,7 @@ export async function buildPoolCreationBatchTransactions(
 /**
  * Derives position bin PDA
  *
- * CRITICAL: Rust program uses i32 (4 bytes) for bin_index seed in PDA derivation.
+ * CRITICAL: program uses i32 (4 bytes) for bin_index seed in PDA derivation.
  *
  * Seeds: ["position_bin", position, bin_index (i32 4 bytes, little-endian)]
  *
@@ -1961,7 +1940,7 @@ export async function buildPoolCreationBatchTransactions(
  * The Rust code uses: bin_index.to_le_bytes() where bin_index is i32, producing 4 bytes.
  *
  * Note: While PositionBin state stores bin_index as u64, the PDA derivation itself
- * uses i32 encoding. These are separate concerns.
+ * uses i32 encoding.
  */
 function derivePositionBinPda(position: PublicKey, binIndexI32: number): [PublicKey, number] {
   // Use i32 (4 bytes) to match Rust program's PDA derivation

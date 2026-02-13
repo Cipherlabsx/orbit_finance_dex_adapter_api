@@ -183,6 +183,20 @@ let candleAgg: ReturnType<typeof startCandleAggregator>;
 let feesAgg: ReturnType<typeof startFeesAggregator>;
 let programStream: ReturnType<typeof startProgramLogStream>;
 
+// Track last event time for health monitoring
+let lastEventTime = 0;
+
+// Decorate app with service references for health checks
+app.decorate("services", {
+  get indexer() { return indexer; },
+  get volumeAgg() { return volumeAgg; },
+  get candleAgg() { return candleAgg; },
+  get feesAgg() { return feesAgg; },
+  get programStream() { return programStream; },
+  get lastEventTime() { return lastEventTime; },
+  updateLastEventTime() { lastEventTime = Date.now(); },
+});
+
 /**
  * Graceful shutdown
  */
@@ -277,6 +291,7 @@ setImmediate(async () => {
       programId: PROGRAM_ID,
       store: app.tradeStore,
       wsHub: app.wsHub,
+      onEvent: () => (app as any).services.updateLastEventTime(),
     });
 
     app.log.info("all background services started");

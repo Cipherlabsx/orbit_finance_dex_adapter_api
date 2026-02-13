@@ -185,8 +185,9 @@ export function startProgramLogStream(params: {
   programId: PublicKey;
   store: TradeStore;
   wsHub: WsHub;
+  onEvent?: () => void;
 }) {
-  const { connection, programId, store, wsHub } = params;
+  const { connection, programId, store, wsHub, onEvent } = params;
 
   const programIdStr = programId.toBase58();
   const seenTx = new Set<string>();
@@ -227,6 +228,9 @@ export function startProgramLogStream(params: {
         const sig = args.result.value.signature;
         if (!sig || seenTx.has(sig)) return;
         seenTx.add(sig);
+
+        // Update last event timestamp for health monitoring
+        if (onEvent) onEvent();
 
         let tx: VersionedTransactionResponse | null = null;
         try {

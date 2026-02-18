@@ -1,23 +1,18 @@
 /**
- * NFT Staking Transaction Builder
+ * NFT Staking Utilities
  *
- * Builds transactions for staking and unstaking NFTs using the Cipher NFT Staking program.
+ * Provides helper functions for querying NFT stake status and deriving PDAs
+ * for the Cipher NFT Staking program.
  */
 
-import {
-  PublicKey,
-  Transaction,
-} from "@solana/web3.js";
-import {
-  getAssociatedTokenAddressSync,
-} from "@solana/spl-token";
+import { PublicKey } from "@solana/web3.js";
 import * as anchor from "@coral-xyz/anchor";
 import type { Program } from "@coral-xyz/anchor";
 import { connection } from "../solana.js";
 import type { CipherNftStaking } from "../idl/cipher_nft_staking.js";
 import cipherNftStakingIdl from "../idl/cipher_nft_staking.json" with { type: "json" };
 
-const { BN, Program: AnchorProgram, AnchorProvider } = anchor;
+const { Program: AnchorProgram, AnchorProvider } = anchor;
 
 const NFT_STAKING_PROGRAM_ID = new PublicKey("7dMir6E96FwiYQQ9mdsL6AKUmgzzrERwqj7mkhthxQgV");
 const METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
@@ -92,81 +87,6 @@ export function deriveMetadataPda(nftMint: PublicKey): [PublicKey, number] {
   );
 }
 
-/**
- * Build stake NFT transaction
- */
-export async function buildStakeNftTransaction(params: {
-  user: string;
-  nftMint: string;
-  collection: string;
-  lockDuration: number;
-  associatedPool?: string | null;
-}): Promise<{ transaction: Transaction; stakeAccount: string }> {
-  const owner = new PublicKey(params.user);
-  const nftMint = new PublicKey(params.nftMint);
-  const associatedPool = params.associatedPool ? new PublicKey(params.associatedPool) : null;
-
-  const program = getProgram(owner);
-
-  const [stakeAccountPda] = deriveStakeAccountPda(nftMint, owner);
-  const ownerNftAccount = getAssociatedTokenAddressSync(nftMint, owner);
-
-  const instruction = await program.methods
-    .stakeNft(new BN(params.lockDuration), associatedPool)
-    .accounts({
-      owner,
-      nftMint,
-      ownerNftAccount,
-    })
-    .instruction();
-
-  const transaction = new Transaction().add(instruction);
-  transaction.feePayer = owner;
-  transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-
-  return {
-    transaction,
-    stakeAccount: stakeAccountPda.toBase58(),
-  };
-}
-
-/**
- * Build unstake NFT transaction
- */
-export async function buildUnstakeNftTransaction(params: {
-  user: string;
-  nftMint: string;
-}): Promise<{ transaction: Transaction }> {
-  const owner = new PublicKey(params.user);
-  const nftMint = new PublicKey(params.nftMint);
-
-  const program = getProgram(owner);
-
-  const [escrowAuthorityPda] = deriveEscrowAuthorityPda(owner);
-
-  const ownerNftAccount = getAssociatedTokenAddressSync(nftMint, owner);
-  const escrowNftAccount = getAssociatedTokenAddressSync(
-    nftMint,
-    escrowAuthorityPda,
-    true
-  );
-
-  const instruction = await program.methods
-    .unstakeNft()
-    .accounts({
-      owner,
-      nftMint,
-      ownerNftAccount,
-      escrowNftAccount,
-    })
-    .instruction();
-
-  const transaction = new Transaction().add(instruction);
-  transaction.feePayer = owner;
-  transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-
-  return { transaction };
-}
 
 /**
  * Get NFT stake status

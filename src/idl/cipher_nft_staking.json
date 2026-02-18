@@ -1,0 +1,1660 @@
+{
+  "address": "7dMir6E96FwiYQQ9mdsL6AKUmgzzrERwqj7mkhthxQgV",
+  "metadata": {
+    "name": "cipher_nft_staking",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Secure NFT staking program for Cipher/Orbit Finance ecosystem"
+  },
+  "docs": [
+    "# Cipher NFT Staking Program",
+    "",
+    "Simple, secure NFT staking program for the Cipher/Orbit Finance ecosystem.",
+    "",
+    "## Features",
+    "- NFT escrow via PDA (cannot be moved during lock)",
+    "- Configurable lock periods per collection",
+    "- Binary lock/unlock system (no complex multipliers)",
+    "- Emergency pause functionality",
+    "- No admin backdoors (authority cannot steal NFTs)",
+    "- Full event emission for off-chain indexing",
+    "",
+    "## Integration with Orbit Finance DLMM",
+    "",
+    "This program tracks NFT staking positions which Orbit Finance DLMM",
+    "uses to determine fee claim eligibility:",
+    "",
+    "1. User stakes NFT here -> NFT locked in escrow",
+    "2. User trades on Orbit Finance DLMM pools -> earns trading fees",
+    "3. Orbit Finance DLMM reads stake_account: is_active && !is_unlocked()",
+    "4. If true -> user is eligible to claim fees",
+    "",
+    "## Security Model",
+    "",
+    "- **NFTs locked in escrow PDA** - physically cannot move until unlock_at",
+    "- **No admin withdrawal** - authority cannot access user NFTs",
+    "- **Checked math everywhere** - prevents overflows",
+    "- **Collection whitelist** - only approved collections stakeable",
+    "- **Metadata verification** - validates NFT authenticity",
+    "",
+    "## Program Flow",
+    "",
+    "```text",
+    "1. Admin: initialize_config()",
+    "2. Admin: add_collection() for each allowed NFT collection",
+    "3. User:  stake_nft() -> NFT locked, stake_account created",
+    "4. User:  [waits for lock period]",
+    "5. User:  claim_rewards() -> optional, tracks rewards claimed",
+    "6. User:  unstake_nft() -> NFT returned, stake_account closed",
+    "```"
+  ],
+  "instructions": [
+    {
+      "name": "add_collection",
+      "docs": [
+        "Add or update a collection's staking configuration",
+        "",
+        "# Arguments",
+        "* `collection` - The NFT collection mint address",
+        "* `min_lock_duration` - Minimum lock time in seconds",
+        "* `max_lock_duration` - Maximum lock time in seconds",
+        "* `enabled` - Whether staking is enabled for this collection",
+        "",
+        "# Security",
+        "Only authority can call this"
+      ],
+      "discriminator": [
+        79,
+        172,
+        225,
+        142,
+        219,
+        192,
+        171,
+        80
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The config authority"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "docs": [
+            "The global config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection_config",
+          "docs": [
+            "The collection config PDA"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "collection"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "collection",
+          "type": "pubkey"
+        },
+        {
+          "name": "min_lock_duration",
+          "type": "i64"
+        },
+        {
+          "name": "max_lock_duration",
+          "type": "i64"
+        },
+        {
+          "name": "enabled",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "claim_rewards",
+      "docs": [
+        "Claim accumulated rewards",
+        "",
+        "# Arguments",
+        "* `amount` - Amount of rewards to mark as claimed",
+        "",
+        "# Note",
+        "This is a tracking function. Actual token distribution",
+        "should be handled by your adapter after reading the event."
+      ],
+      "discriminator": [
+        4,
+        144,
+        132,
+        71,
+        116,
+        23,
+        151,
+        80
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "docs": [
+            "The NFT owner claiming rewards"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "stake_account",
+          "docs": [
+            "The stake account"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  116,
+                  97,
+                  107,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "stake_account.nft_mint",
+                "account": "StakeAccount"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "docs": [
+            "Global config"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initialize_config",
+      "docs": [
+        "Initialize the global config (call once)",
+        "",
+        "# Arguments",
+        "* `protocol_fee_bps` - Optional fee in basis points (max 1000 = 10%)"
+      ],
+      "discriminator": [
+        208,
+        127,
+        21,
+        1,
+        194,
+        190,
+        196,
+        70
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The authority that will control the config",
+            "**Recommendation:** Use a multisig wallet"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "docs": [
+            "The global config PDA"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "protocol_fee_bps",
+          "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "stake_nft",
+      "docs": [
+        "Stake an NFT",
+        "",
+        "# Arguments",
+        "* `lock_duration` - How long to lock in seconds",
+        "* `associated_pool` - Optional DLMM pool address for targeted benefits",
+        "",
+        "# Security",
+        "- Verifies NFT ownership",
+        "- Validates collection is whitelisted",
+        "- Validates lock duration within bounds",
+        "- Transfers NFT to escrow PDA (user cannot move it)"
+      ],
+      "discriminator": [
+        38,
+        27,
+        66,
+        46,
+        69,
+        65,
+        151,
+        219
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "docs": [
+            "The NFT owner who is staking"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "nft_mint",
+          "docs": [
+            "The NFT mint"
+          ]
+        },
+        {
+          "name": "owner_nft_account",
+          "docs": [
+            "The owner's NFT token account (must hold exactly 1 token)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "escrow_nft_account",
+          "docs": [
+            "The escrow PDA that will hold the NFT",
+            "Derived from nft_mint for unique escrow per NFT"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "escrow_authority"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "escrow_authority",
+          "docs": [
+            "The escrow authority PDA (owns escrow_nft_account)",
+            "Per-user escrow authority prevents any collision scenarios"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "nft_metadata",
+          "docs": [
+            "The NFT's metadata account (for collection verification)"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  11,
+                  112,
+                  101,
+                  177,
+                  227,
+                  209,
+                  124,
+                  69,
+                  56,
+                  157,
+                  82,
+                  127,
+                  107,
+                  4,
+                  195,
+                  205,
+                  88,
+                  184,
+                  108,
+                  115,
+                  26,
+                  160,
+                  253,
+                  181,
+                  73,
+                  182,
+                  209,
+                  188,
+                  3,
+                  248,
+                  41,
+                  70
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                11,
+                112,
+                101,
+                177,
+                227,
+                209,
+                124,
+                69,
+                56,
+                157,
+                82,
+                127,
+                107,
+                4,
+                195,
+                205,
+                88,
+                184,
+                108,
+                115,
+                26,
+                160,
+                253,
+                181,
+                73,
+                182,
+                209,
+                188,
+                3,
+                248,
+                41,
+                70
+              ]
+            }
+          }
+        },
+        {
+          "name": "stake_account",
+          "docs": [
+            "The stake account PDA (stores stake info)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  116,
+                  97,
+                  107,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection_config",
+          "docs": [
+            "The collection config (must be whitelisted)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "collection_config.collection",
+                "account": "CollectionConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "docs": [
+            "Global config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "lock_duration",
+          "type": "i64"
+        },
+        {
+          "name": "associated_pool",
+          "type": {
+            "option": "pubkey"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unstake_nft",
+      "docs": [
+        "Unstake an NFT after lock period expires",
+        "",
+        "# Security",
+        "- Verifies lock period has passed",
+        "- Verifies owner matches",
+        "- Returns NFT to owner",
+        "- Closes stake account (rent refund)"
+      ],
+      "discriminator": [
+        17,
+        182,
+        24,
+        211,
+        101,
+        138,
+        50,
+        163
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "docs": [
+            "The NFT owner who is unstaking"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "nft_mint",
+          "docs": [
+            "The NFT mint"
+          ]
+        },
+        {
+          "name": "owner_nft_account",
+          "docs": [
+            "The owner's NFT token account (receives NFT back)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "escrow_nft_account",
+          "docs": [
+            "The escrow account holding the NFT"
+          ],
+          "writable": true
+        },
+        {
+          "name": "escrow_authority",
+          "docs": [
+            "The escrow authority PDA (per-user, matches stake_nft)"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "stake_account",
+          "docs": [
+            "The stake account"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  116,
+                  97,
+                  107,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "nft_mint"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection_config",
+          "docs": [
+            "The collection config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "stake_account.collection",
+                "account": "StakeAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "docs": [
+            "Global config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "update_config",
+      "docs": [
+        "Update global configuration",
+        "",
+        "# Arguments",
+        "* `new_authority` - Transfer authority (optional)",
+        "* `paused` - Pause/unpause staking (optional)",
+        "* `protocol_fee_bps` - Update protocol fee (optional)",
+        "",
+        "# Security",
+        "Only current authority can call this"
+      ],
+      "discriminator": [
+        29,
+        158,
+        252,
+        191,
+        10,
+        83,
+        219,
+        99
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The config authority"
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "docs": [
+            "The global config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "new_authority",
+          "type": {
+            "option": "pubkey"
+          }
+        },
+        {
+          "name": "paused",
+          "type": {
+            "option": "bool"
+          }
+        },
+        {
+          "name": "protocol_fee_bps",
+          "type": {
+            "option": "u16"
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "CollectionConfig",
+      "discriminator": [
+        223,
+        110,
+        152,
+        160,
+        174,
+        157,
+        106,
+        255
+      ]
+    },
+    {
+      "name": "GlobalConfig",
+      "discriminator": [
+        149,
+        8,
+        156,
+        202,
+        160,
+        252,
+        176,
+        217
+      ]
+    },
+    {
+      "name": "StakeAccount",
+      "discriminator": [
+        80,
+        158,
+        67,
+        124,
+        50,
+        189,
+        192,
+        255
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "CollectionWhitelisted",
+      "discriminator": [
+        4,
+        226,
+        106,
+        185,
+        158,
+        33,
+        19,
+        211
+      ]
+    },
+    {
+      "name": "ConfigUpdated",
+      "discriminator": [
+        40,
+        241,
+        230,
+        122,
+        11,
+        19,
+        198,
+        194
+      ]
+    },
+    {
+      "name": "NftStaked",
+      "discriminator": [
+        150,
+        229,
+        155,
+        99,
+        88,
+        181,
+        254,
+        61
+      ]
+    },
+    {
+      "name": "NftUnstaked",
+      "discriminator": [
+        253,
+        242,
+        47,
+        131,
+        231,
+        214,
+        72,
+        117
+      ]
+    },
+    {
+      "name": "RewardsClaimed",
+      "discriminator": [
+        75,
+        98,
+        88,
+        18,
+        219,
+        112,
+        88,
+        121
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "CollectionNotWhitelisted",
+      "msg": "The NFT collection is not whitelisted for staking"
+    },
+    {
+      "code": 6001,
+      "name": "StillLocked",
+      "msg": "The lock period has not expired yet"
+    },
+    {
+      "code": 6002,
+      "name": "InvalidLockDuration",
+      "msg": "Invalid lock duration - must be between min and max"
+    },
+    {
+      "code": 6003,
+      "name": "InvalidNftOwner",
+      "msg": "NFT is not owned by the signer"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidMetadata",
+      "msg": "Invalid NFT metadata"
+    },
+    {
+      "code": 6005,
+      "name": "StakeAccountMismatch",
+      "msg": "Stake account does not match NFT"
+    },
+    {
+      "code": 6006,
+      "name": "InvalidAuthority",
+      "msg": "Config authority mismatch"
+    },
+    {
+      "code": 6007,
+      "name": "CollectionConfigNotFound",
+      "msg": "Collection config not found"
+    },
+    {
+      "code": 6008,
+      "name": "ArithmeticOverflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6009,
+      "name": "RewardsNotClaimable",
+      "msg": "Rewards not yet claimable"
+    },
+    {
+      "code": 6010,
+      "name": "NoRewards",
+      "msg": "No rewards to claim"
+    },
+    {
+      "code": 6011,
+      "name": "InvalidMultiplier",
+      "msg": "Invalid reward multiplier"
+    },
+    {
+      "code": 6012,
+      "name": "StakeAlreadyExists",
+      "msg": "Stake account already exists"
+    },
+    {
+      "code": 6013,
+      "name": "ProgramPaused",
+      "msg": "Program is paused"
+    },
+    {
+      "code": 6014,
+      "name": "InvalidTokenAccount",
+      "msg": "Invalid token account"
+    },
+    {
+      "code": 6015,
+      "name": "MetadataVerificationFailed",
+      "msg": "NFT metadata verification failed"
+    }
+  ],
+  "types": [
+    {
+      "name": "CollectionConfig",
+      "docs": [
+        "Configuration for a specific NFT collection",
+        "",
+        "Each whitelisted collection has its own config that defines:",
+        "- Allowed lock durations",
+        "- Whether staking is enabled",
+        "",
+        "**Integration with Orbit Finance DLMM:** Orbit Finance DLMM checks if a user has an active",
+        "stake by reading the StakeAccount. If staked -> eligible for fee claims."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "collection",
+            "docs": [
+              "The NFT collection's verified collection address"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "enabled",
+            "docs": [
+              "Whether staking is enabled for this collection"
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for PDA derivation"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "min_lock_duration",
+            "docs": [
+              "Minimum lock duration in seconds (e.g., 7 days = 604800)"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "max_lock_duration",
+            "docs": [
+              "Maximum lock duration in seconds (e.g., 365 days = 31536000)"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "_reserved",
+            "docs": [
+              "Reserved space for alignment"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "total_staked",
+            "docs": [
+              "Total number of NFTs currently staked from this collection"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lifetime_stakes",
+            "docs": [
+              "Total all-time stakes from this collection"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "_padding",
+            "docs": [
+              "Reserved space for future fields"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                128
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "CollectionWhitelisted",
+      "docs": [
+        "Emitted when a collection is whitelisted"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "collection",
+            "docs": [
+              "The collection mint address"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "min_lock_duration",
+            "docs": [
+              "Minimum lock duration in seconds"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "max_lock_duration",
+            "docs": [
+              "Maximum lock duration in seconds"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "enabled",
+            "docs": [
+              "Whether this collection is enabled"
+            ],
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigUpdated",
+      "docs": [
+        "Emitted when global config is updated"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "docs": [
+              "The authority that made the update"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "docs": [
+              "Whether the program is paused"
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "updated_at",
+            "docs": [
+              "Unix timestamp of update"
+            ],
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "GlobalConfig",
+      "docs": [
+        "Global configuration for the NFT staking program",
+        "",
+        "This account stores program-wide settings and is controlled by the authority.",
+        "Only one instance exists per program.",
+        "",
+        "**Security:** Authority should be a multisig or governance program."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "docs": [
+              "The authority that can update config and manage collections",
+              "Should be a multisig for security"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "docs": [
+              "Whether the program is paused (emergency stop)"
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for PDA derivation"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "docs": [
+              "Reserved for future upgrades (alignment padding)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                6
+              ]
+            }
+          },
+          {
+            "name": "total_stakes",
+            "docs": [
+              "Total number of active stakes across all collections"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "collection_count",
+            "docs": [
+              "Total number of whitelisted collections"
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "protocol_fee_bps",
+            "docs": [
+              "Protocol fee in basis points (e.g., 100 = 1%)",
+              "Applied to rewards (optional, can be 0)"
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "_padding",
+            "docs": [
+              "Reserved space for future fields"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                128
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "NftStaked",
+      "docs": [
+        "Emitted when a new NFT is staked"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "staker",
+            "docs": [
+              "The public key of the staker"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "nft_mint",
+            "docs": [
+              "The mint address of the staked NFT"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "collection",
+            "docs": [
+              "The collection this NFT belongs to"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "staked_at",
+            "docs": [
+              "Unix timestamp when the stake was created"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "unlock_at",
+            "docs": [
+              "Unix timestamp when the NFT can be unstaked"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "lock_duration",
+            "docs": [
+              "Lock duration in seconds"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "stake_account",
+            "docs": [
+              "The PDA address of the stake account"
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "NftUnstaked",
+      "docs": [
+        "Emitted when an NFT is unstaked"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "staker",
+            "docs": [
+              "The public key of the staker"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "nft_mint",
+            "docs": [
+              "The mint address of the unstaked NFT"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "unstaked_at",
+            "docs": [
+              "Unix timestamp when unstaked"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "total_staked_duration",
+            "docs": [
+              "Total time staked in seconds"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "rewards_earned",
+            "docs": [
+              "Total rewards earned (if any)"
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RewardsClaimed",
+      "docs": [
+        "Emitted when rewards are claimed"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "staker",
+            "docs": [
+              "The public key of the staker"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "nft_mint",
+            "docs": [
+              "The mint address of the staked NFT"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "docs": [
+              "Amount of rewards claimed"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "claimed_at",
+            "docs": [
+              "Unix timestamp when claimed"
+            ],
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StakeAccount",
+      "docs": [
+        "Individual NFT stake account",
+        "",
+        "One account per staked NFT. Stores all information about the stake:",
+        "- Ownership",
+        "- Lock period",
+        "- Lock status",
+        "- Metadata reference",
+        "",
+        "**Security:**",
+        "- NFT is held in escrow PDA (different from this account)",
+        "- Cannot be moved until unlock_at timestamp passes",
+        "- Owner verification required for all operations",
+        "",
+        "**Orbit Finance DLMM Integration:**",
+        "Orbit Finance DLMM reads this account to check: is_active && !is_unlocked(now)",
+        "If true -> user is eligible for fee claims"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "docs": [
+              "The owner/staker of this NFT"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "nft_mint",
+            "docs": [
+              "The NFT mint address (used for PDA derivation)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "collection",
+            "docs": [
+              "The verified collection this NFT belongs to"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "staked_at",
+            "docs": [
+              "Unix timestamp when the stake was created"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "unlock_at",
+            "docs": [
+              "Unix timestamp when the NFT can be unstaked"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "lock_duration",
+            "docs": [
+              "Lock duration in seconds"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for this PDA"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "is_active",
+            "docs": [
+              "Whether this stake is currently active"
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "_reserved",
+            "docs": [
+              "Reserved for alignment"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                6
+              ]
+            }
+          },
+          {
+            "name": "rewards_claimed",
+            "docs": [
+              "Total rewards claimed so far"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "last_claim_at",
+            "docs": [
+              "Last time rewards were claimed"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "associated_pool",
+            "docs": [
+              "Optional: Associated pool address from DLMM",
+              "If set, this stake provides benefits for that specific pool"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "_padding",
+            "docs": [
+              "Reserved space for future fields"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                128
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

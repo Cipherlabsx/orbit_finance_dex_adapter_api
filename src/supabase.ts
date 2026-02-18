@@ -266,3 +266,157 @@ export async function updateDexPoolTvlLocked(params: {
 
   console.log(`[SUPABASE] Updated tvl_locked_quote for ${pool} to ${tvlLockedQuote} at slot ${slot}`);
 }
+
+// NFT STAKING
+export type NftStakeRow = {
+  id?: string;
+  nft_mint: string;
+  owner_wallet: string;
+  staked_at: string; // ISO timestamp
+  unlock_at: string; // ISO timestamp
+  lock_duration_seconds: number;
+  status: "active" | "unlocked" | "withdrawn" | "expired";
+  reward_tier?: "standard" | "premium" | "legendary";
+  reward_multiplier?: number;
+  rewards_claimed?: string;
+  last_claim_at?: string;
+  escrow_pda?: string;
+  stake_signature: string;
+  withdraw_signature?: string;
+  associated_pool?: string;
+  nft_collection: string;
+  nft_metadata?: Record<string, any>;
+};
+
+/**
+ * Insert new NFT stake
+ */
+export async function insertNftStake(stake: Omit<NftStakeRow, "id">): Promise<void> {
+  const { error } = await supabase.from("nft_stakes").insert(stake);
+
+  if (error) {
+    throw new Error(`insertNftStake failed: ${error.message}`);
+  }
+
+  console.log(`[SUPABASE] Inserted NFT stake: ${stake.nft_mint} by ${stake.owner_wallet}`);
+}
+
+/**
+ * Update NFT stake on unstake
+ */
+export async function updateNftStakeOnUnstake(params: {
+  nftMint: string;
+  ownerWallet: string;
+  withdrawSignature: string;
+  rewardsClaimed?: string;
+}): Promise<void> {
+  const { nftMint, ownerWallet, withdrawSignature, rewardsClaimed } = params;
+
+  const { error } = await supabase
+    .from("nft_stakes")
+    .update({
+      status: "withdrawn",
+      withdraw_signature: withdrawSignature,
+      rewards_claimed: rewardsClaimed,
+      updated_at: nowIso(),
+    })
+    .eq("nft_mint", nftMint)
+    .eq("owner_wallet", ownerWallet)
+    .eq("status", "active");
+
+  if (error) {
+    throw new Error(`updateNftStakeOnUnstake failed: ${error.message}`);
+  }
+
+  console.log(`[SUPABASE] Updated NFT stake on unstake: ${nftMint}`);
+}
+
+/**
+ * Update rewards claimed
+ */
+export async function updateNftStakeRewardsClaimed(params: {
+  nftMint: string;
+  ownerWallet: string;
+  rewardsClaimed: string;
+  claimedAt: string;
+}): Promise<void> {
+  const { nftMint, ownerWallet, rewardsClaimed, claimedAt } = params;
+
+  const { error } = await supabase
+    .from("nft_stakes")
+    .update({
+      rewards_claimed: rewardsClaimed,
+      last_claim_at: claimedAt,
+      updated_at: nowIso(),
+    })
+    .eq("nft_mint", nftMint)
+    .eq("owner_wallet", ownerWallet)
+    .eq("status", "active");
+
+  if (error) {
+    throw new Error(`updateNftStakeRewardsClaimed failed: ${error.message}`);
+  }
+
+  console.log(`[SUPABASE] Updated rewards claimed: ${rewardsClaimed} for ${nftMint}`);
+}
+
+/**
+ * Get active NFT stakes for an owner
+ */
+export async function getActiveNftStakes(ownerWallet: string): Promise<NftStakeRow[]> {
+  const { data, error } = await supabase
+    .from("nft_stakes")
+    .select("*")
+    .eq("owner_wallet", ownerWallet)
+    .eq("status", "active")
+    .order("staked_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`getActiveNftStakes failed: ${error.message}`);
+  }
+
+  return data || [];
+}
+
+/**
+ * Get NFT stake by mint
+ */
+export async function getNftStakeByMint(nftMint: string): Promise<NftStakeRow | null> {
+  const { data, error } = await supabase
+    .from("nft_stakes")
+    .select("*")
+    .eq("nft_mint", nftMint)
+    .eq("status", "active")
+    .single();
+
+  if (error && error.code !== "PGRST116") {
+    // PGRST116 = no rows returned
+    throw new Error(`getNftStakeByMint failed: ${error.message}`);
+  }
+
+  return data;
+}
+
+/**
+ * Mark expired stakes as unlocked
+ * Run this periodically to update status
+ */
+export async function markExpiredStakesAsUnlocked(): Promise<number> {
+  const { data, error } = await supabase
+    .from("nft_stakes")
+    .update({ status: "unlocked", updated_at: nowIso() })
+    .eq("status", "active")
+    .lt("unlock_at", nowIso())
+    .select();
+
+  if (error) {
+    throw new Error(`markExpiredStakesAsUnlocked failed: ${error.message}`);
+  }
+
+  const count = data?.length || 0;
+  if (count > 0) {
+    console.log(`[SUPABASE] Marked ${count} expired stakes as unlocked`);
+  }
+
+  return count;
+}

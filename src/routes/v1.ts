@@ -16,6 +16,12 @@ import { dbListPools, dbGetPool } from "../services/pool_db.js";
 import { dbListTokens, dbGetToken } from "../services/token_registry.js";
 import { getTokenPrice, getRelativePrice, getBatchPrices } from "../services/price_oracle.js";
 import { calculateHolderClaimable, calculateNftClaimable } from "../services/rewards.js";
+import {
+  buildStakeNftTransaction,
+  buildUnstakeNftTransaction,
+  getNftStakeStatus,
+} from "../services/nft_staking_tx_builder.js";
+import { getActiveNftStakes } from "../supabase.js";
 import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, buildPoolCreationBatchTransactions, type FeeConfig } from "../services/pool_creation.js";
 import { readPoolComplete } from "../services/pool_reader.js";
 import { upsertDexPool, supabase } from "../supabase.js";
@@ -1064,6 +1070,104 @@ export async function v1Routes(app: FastifyInstance) {
     const params = z.object({ owner: z.string().min(32) }).parse(req.params);
     const rows = getOwnerStreamflowStakes((app as any).stakeStore, params.owner);
     return { owner: params.owner, rows, ts: Date.now() };
+  });
+
+  // GET /api/v1/nft-staking/stakes/:owner
+  app.get("/nft-staking/stakes/:owner", async (req, reply) => {
+    const params = z.object({ owner: z.string().min(32) }).parse(req.params);
+
+    try {
+      const stakes = await getActiveNftStakes(params.owner);
+      reply.header("cache-control", "no-store");
+      return { owner: params.owner, stakes, count: stakes.length, ts: Date.now() };
+    } catch (error) {
+      reply.code(500);
+      return { error: error instanceof Error ? error.message : "Failed to fetch NFT stakes" };
+    }
+  });
+
+  // GET /api/v1/nft-staking/status/:nftMint/:owner
+  app.get("/nft-staking/status/:nftMint/:owner", async (req, reply) => {
+    const params = z.object({
+      nftMint: z.string().min(32),
+      owner: z.string().min(32),
+    }).parse(req.params);
+
+    try {
+      const status = await getNftStakeStatus(params);
+      reply.header("cache-control", "no-store");
+      return status;
+    } catch (error) {
+      reply.code(500);
+      return { error: error instanceof Error ? error.message : "Failed to fetch stake status" };
+    }
+  });
+
+  // POST /api/v1/nft-staking/stake
+  app.post("/nft-staking/stake", async (req, reply) => {
+    const schema = z.object({
+      user: z.string().length(44),
+      nftMint: z.string().min(32),
+      collection: z.string().min(32),
+      lockDuration: z.number().int().positive(),
+      associatedPool: z.string().min(32).optional().nullable(),
+    });
+
+    try {
+      const body = schema.parse(req.body);
+      const { transaction, stakeAccount } = await buildStakeNftTransaction(body);
+
+      reply.header("cache-control", "no-store");
+      return {
+        txBase64: transaction.serialize({ requireAllSignatures: false }).toString("base64"),
+        stakeAccount,
+        ts: Date.now(),
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      if (errorMessage.includes("validation") || errorMessage.includes("invalid")) {
+        reply.code(400);
+        return { error: "invalid_request", message: errorMessage };
+      }
+
+      reply.code(500);
+      return { error: "transaction_build_failed", message: errorMessage };
+    }
+  });
+
+  // POST /api/v1/nft-staking/unstake
+  app.post("/nft-staking/unstake", async (req, reply) => {
+    const schema = z.object({
+      user: z.string().length(44),
+      nftMint: z.string().min(32),
+    });
+
+    try {
+      const body = schema.parse(req.body);
+      const { transaction } = await buildUnstakeNftTransaction(body);
+
+      reply.header("cache-control", "no-store");
+      return {
+        txBase64: transaction.serialize({ requireAllSignatures: false }).toString("base64"),
+        ts: Date.now(),
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      if (errorMessage.includes("validation") || errorMessage.includes("invalid")) {
+        reply.code(400);
+        return { error: "invalid_request", message: errorMessage };
+      }
+
+      if (errorMessage.includes("stillLocked")) {
+        reply.code(400);
+        return { error: "still_locked", message: "NFT is still locked" };
+      }
+
+      reply.code(500);
+      return { error: "transaction_build_failed", message: errorMessage };
+    }
   });
 
   // POST /api/v1/rewards/holder/claimable

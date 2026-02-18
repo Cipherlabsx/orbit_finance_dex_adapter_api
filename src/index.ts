@@ -20,6 +20,7 @@ import { createStreamflowStakeStore, startStreamflowStakingAggregator } from "./
 import { createFeesStore, initFeesFromDb, startFeesAggregator } from "./services/fees_aggregator.js";
 import { initPriceCache, cleanPriceCache } from "./services/price_oracle.js";
 import { dbListTokens } from "./services/token_registry.js";
+import { startNftStakingIndexer, markExpiredStakes } from "./services/nft_staking_indexer.js";
 
 /**
  * Logger
@@ -182,6 +183,8 @@ let volumeAgg: ReturnType<typeof startVolumeAggregator>;
 let candleAgg: ReturnType<typeof startCandleAggregator>;
 let feesAgg: ReturnType<typeof startFeesAggregator>;
 let programStream: ReturnType<typeof startProgramLogStream>;
+let nftStakingSubscription: number | null = null;
+let expiredStakesInterval: NodeJS.Timeout | null = null;
 
 // Track last event time for health monitoring
 let lastEventTime = 0;
@@ -204,6 +207,7 @@ const shutdown = async (signal: string) => {
   app.log.info({ signal }, "shutting down");
   clearInterval(interval);
   clearInterval(priceInterval);
+  if (expiredStakesInterval) clearInterval(expiredStakesInterval);
 
   if (indexer) indexer.stop();
   if (volumeAgg) volumeAgg.stop();
@@ -212,6 +216,15 @@ const shutdown = async (signal: string) => {
 
   await streamflowAgg.stop().catch(() => {});
   if (programStream) await programStream.stop().catch(() => {});
+
+  // Stop NFT staking indexer
+  if (nftStakingSubscription !== null) {
+    try {
+      await connection.removeOnLogsListener(nftStakingSubscription);
+    } catch (err) {
+      app.log.warn({ err }, "failed to stop NFT staking indexer");
+    }
+  }
 
   try {
     await app.close();
@@ -293,6 +306,18 @@ setImmediate(async () => {
       wsHub: app.wsHub,
       onEvent: () => (app as any).services.updateLastEventTime(),
     });
+
+    // Start NFT staking indexer
+    nftStakingSubscription = await startNftStakingIndexer(connection);
+
+    // Mark expired stakes every 5 minutes
+    expiredStakesInterval = setInterval(async () => {
+      try {
+        await markExpiredStakes();
+      } catch (err) {
+        app.log.warn({ err }, "failed to mark expired stakes");
+      }
+    }, 5 * 60 * 1000);
 
     app.log.info("all background services started");
   } catch (err) {

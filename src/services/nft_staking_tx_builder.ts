@@ -11,10 +11,13 @@ import {
 import {
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
-import { BN, Program, AnchorProvider } from "@coral-xyz/anchor";
+import * as anchor from "@coral-xyz/anchor";
+import type { Program } from "@coral-xyz/anchor";
 import { connection } from "../solana.js";
 import type { CipherNftStaking } from "../idl/cipher_nft_staking.js";
 import cipherNftStakingIdl from "../idl/cipher_nft_staking.json" with { type: "json" };
+
+const { BN, Program: AnchorProgram, AnchorProvider } = anchor;
 
 const NFT_STAKING_PROGRAM_ID = new PublicKey("7dMir6E96FwiYQQ9mdsL6AKUmgzzrERwqj7mkhthxQgV");
 const METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
@@ -33,7 +36,7 @@ function getProgram(userPubkey: PublicKey): Program<CipherNftStaking> {
     { commitment: "confirmed" }
   );
 
-  return new Program(cipherNftStakingIdl as CipherNftStaking, provider);
+  return new AnchorProgram(cipherNftStakingIdl as CipherNftStaking, provider);
 }
 
 /**

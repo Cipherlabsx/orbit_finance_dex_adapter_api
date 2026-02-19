@@ -269,7 +269,8 @@ export type CipherNftStaking = {
           "name": "collection",
           "docs": [
             "The collection that this asset belongs to"
-          ]
+          ],
+          "writable": true
         },
         {
           "name": "stakeAccount",
@@ -452,7 +453,8 @@ export type CipherNftStaking = {
           "name": "collection",
           "docs": [
             "The collection that this asset belongs to"
-          ]
+          ],
+          "writable": true
         },
         {
           "name": "stakeAccount",

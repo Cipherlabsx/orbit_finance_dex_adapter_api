@@ -14,7 +14,8 @@
     "backfill:pools": "tsx src/scripts/pool_backfill.ts",
     "backfill:pools:liq": "tsx src/scripts/pool_liquidity_backfill.ts",
     "backfill:pools:fee-balances": "tsx src/scripts/pool_backfill_fee_balances.ts",
-    "backfill:pools:bins": "tsx src/scripts/backfill-pool-bins.ts"
+    "backfill:pools:bins": "tsx src/scripts/backfill-pool-bins.ts",
+    "backfill:nft-stakes": "tsx src/scripts/backfill_nft_stakes.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",

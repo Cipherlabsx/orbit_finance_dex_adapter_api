@@ -10,6 +10,7 @@
  */
 
 import type { Connection, VersionedTransactionResponse } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
 import { supabase } from "../supabase.js";
 
 // NFT Staking Program ID
@@ -128,7 +129,6 @@ function parseNftStakedEvent(data: Buffer): NftStakedEvent | null {
     const lockDuration = data.readBigInt64LE(offset); offset += 8;
     const stakeAccount = data.subarray(offset, offset + 32);
 
-    const { PublicKey } = require("@solana/web3.js");
     return {
       name: "NftStaked",
       data: {
@@ -161,7 +161,6 @@ function parseNftUnstakedEvent(data: Buffer): NftUnstakedEvent | null {
     const unstakedAt = data.readBigInt64LE(offset); offset += 8;
     const totalStakedDuration = data.readBigInt64LE(offset);
 
-    const { PublicKey } = require("@solana/web3.js");
     return {
       name: "NftUnstaked",
       data: {
@@ -281,7 +280,7 @@ export async function startNftStakingIndexer(connection: Connection): Promise<nu
   console.log("[NFT_STAKING] Starting NFT Staking indexer...");
   console.log(`[NFT_STAKING] Program ID: ${NFT_STAKING_PROGRAM_ID}`);
 
-  const programPubkey = new (await import("@solana/web3.js")).PublicKey(NFT_STAKING_PROGRAM_ID);
+  const programPubkey = new PublicKey(NFT_STAKING_PROGRAM_ID);
 
   const subscriptionId = connection.onLogs(
     programPubkey,

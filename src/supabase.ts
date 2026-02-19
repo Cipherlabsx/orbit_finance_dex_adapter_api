@@ -420,3 +420,50 @@ export async function markExpiredStakesAsUnlocked(): Promise<number> {
 
   return count;
 }
+/**
+ * Get NFT staking statistics
+ * Returns counts of active/total stakes per collection
+ */
+export async function getNftStakingStats(collection?: string): Promise<{
+  totalStaked: number;
+  totalSupply: number | null;
+  stakingPercentage: number | null;
+  activeStakes: number;
+  withdrawnStakes: number;
+  unlockedStakes: number;
+}> {
+  // Build query filters
+  let query = supabase
+    .from("nft_stakes")
+    .select("status");
+
+  if (collection) {
+    query = query.eq("nft_collection", collection);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    throw new Error(`getNftStakingStats failed: ${error.message}`);
+  }
+
+  const stakes = data || [];
+  const activeStakes = stakes.filter(s => s.status === "active").length;
+  const withdrawnStakes = stakes.filter(s => s.status === "withdrawn").length;
+  const unlockedStakes = stakes.filter(s => s.status === "unlocked").length;
+  const totalStaked = activeStakes + unlockedStakes;
+
+  // Get total supply from collection config if available
+  // For now, return null - this can be enhanced with collection metadata
+  const totalSupply = null;
+  const stakingPercentage = totalSupply ? (totalStaked / totalSupply) * 100 : null;
+
+  return {
+    totalStaked,
+    totalSupply,
+    stakingPercentage,
+    activeStakes,
+    withdrawnStakes,
+    unlockedStakes,
+  };
+}

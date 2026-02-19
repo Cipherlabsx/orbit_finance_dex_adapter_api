@@ -15,7 +15,7 @@ export type CipherNftStaking = {
   "docs": [
     "# Cipher NFT Staking Program",
     "",
-    "Simple, secure NFT staking program for the Cipher/Orbit Finance ecosystem.",
+    "Secure NFT staking program for the Cipher/Orbit Finance ecosystem.",
     "",
     "## Features",
     "- NFT escrow via PDA (cannot be moved during lock)",
@@ -50,8 +50,7 @@ export type CipherNftStaking = {
     "2. Admin: add_collection() for each allowed NFT collection",
     "3. User:  stake_nft() -> NFT locked, stake_account created",
     "4. User:  [waits for lock period]",
-    "5. User:  claim_rewards() -> optional, tracks rewards claimed",
-    "6. User:  unstake_nft() -> NFT returned, stake_account closed",
+    "5. User:  unstake_nft() -> NFT returned, stake_account closed",
     "```"
   ],
   "instructions": [
@@ -165,96 +164,6 @@ export type CipherNftStaking = {
       ]
     },
     {
-      "name": "claimRewards",
-      "docs": [
-        "Claim accumulated rewards",
-        "",
-        "# Arguments",
-        "* `amount` - Amount of rewards to mark as claimed",
-        "",
-        "# Note",
-        "This is a tracking function. Actual token distribution",
-        "should be handled by your adapter after reading the event."
-      ],
-      "discriminator": [
-        4,
-        144,
-        132,
-        71,
-        116,
-        23,
-        151,
-        80
-      ],
-      "accounts": [
-        {
-          "name": "owner",
-          "docs": [
-            "The NFT owner claiming rewards"
-          ],
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "stakeAccount",
-          "docs": [
-            "The stake account"
-          ],
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  115,
-                  116,
-                  97,
-                  107,
-                  101
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "stake_account.nft_mint",
-                "account": "stakeAccount"
-              },
-              {
-                "kind": "account",
-                "path": "owner"
-              }
-            ]
-          }
-        },
-        {
-          "name": "config",
-          "docs": [
-            "Global config"
-          ],
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  111,
-                  110,
-                  102,
-                  105,
-                  103
-                ]
-              }
-            ]
-          }
-        }
-      ],
-      "args": [
-        {
-          "name": "amount",
-          "type": "u64"
-        }
-      ]
-    },
-    {
       "name": "initializeConfig",
       "docs": [
         "Initialize the global config (call once)",
@@ -276,8 +185,7 @@ export type CipherNftStaking = {
         {
           "name": "authority",
           "docs": [
-            "The authority that will control the config",
-            "**Recommendation:** Use a multisig wallet"
+            "The authority that will control the config"
           ],
           "writable": true,
           "signer": true
@@ -317,13 +225,267 @@ export type CipherNftStaking = {
       ]
     },
     {
+      "name": "stakeCompressedNft",
+      "docs": [
+        "Stake a compressed NFT (cNFT) from a Bubblegum merkle tree",
+        "",
+        "# Arguments",
+        "* `leaf_index` - Position of the NFT leaf in the merkle tree",
+        "* `lock_duration` - How long to lock in seconds",
+        "* `associated_pool` - Optional Orbit Finance DLMM pool address for targeted benefits",
+        "",
+        "# Security",
+        "- Verifies lock duration within bounds",
+        "- Sets program PDA as Bubblegum delegate (locks the cNFT)",
+        "- Creates stake account with nft_type=1 (compressed)",
+        "",
+        "Stake a compressed NFT by setting delegation",
+        "",
+        "# Arguments",
+        "* `root` - Merkle tree root hash",
+        "* `data_hash` - Hash of the NFT data",
+        "* `creator_hash` - Hash of the creator array",
+        "* `nonce` - Leaf nonce for validation",
+        "* `index` - Leaf index in the merkle tree",
+        "* `lock_duration` - Lock period in seconds",
+        "* `associated_pool` - Optional Orbit Finance DLMM pool address",
+        "",
+        "# Note",
+        "For compressed NFTs, the merkle_tree address is stored in nft_mint field.",
+        "Use merkle_tree (not nft_mint) to derive the stake account PDA.",
+        "All merkle proof parameters must be fetched from DAS API."
+      ],
+      "discriminator": [
+        32,
+        168,
+        169,
+        197,
+        122,
+        248,
+        159,
+        64
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "docs": [
+            "The NFT owner who is staking"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "merkleTree",
+          "docs": [
+            "The merkle tree account"
+          ]
+        },
+        {
+          "name": "treeAuthority",
+          "docs": [
+            "The tree authority/config PDA"
+          ]
+        },
+        {
+          "name": "leafOwner",
+          "docs": [
+            "The leaf owner (should match owner)"
+          ]
+        },
+        {
+          "name": "leafDelegate",
+          "docs": [
+            "The leaf delegate PDA that will \"lock\" the cNFT"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  110,
+                  102,
+                  116,
+                  95,
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "stakeAccount",
+          "docs": [
+            "The stake account PDA",
+            "KEY: Uses merkle_tree address instead of nft_mint"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  116,
+                  97,
+                  107,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "merkleTree"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collectionConfig",
+          "docs": [
+            "The collection config (must be whitelisted)"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "collection_config.collection",
+                "account": "collectionConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "docs": [
+            "Global config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bubblegumProgram",
+          "docs": [
+            "Bubblegum program"
+          ]
+        },
+        {
+          "name": "logWrapper",
+          "docs": [
+            "Log wrapper for Bubblegum"
+          ]
+        },
+        {
+          "name": "compressionProgram",
+          "docs": [
+            "Compression program"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "dataHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "creatorHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "nonce",
+          "type": "u64"
+        },
+        {
+          "name": "index",
+          "type": "u32"
+        },
+        {
+          "name": "lockDuration",
+          "type": "i64"
+        },
+        {
+          "name": "associatedPool",
+          "type": {
+            "option": "pubkey"
+          }
+        }
+      ]
+    },
+    {
       "name": "stakeNft",
       "docs": [
         "Stake an NFT",
         "",
         "# Arguments",
         "* `lock_duration` - How long to lock in seconds",
-        "* `associated_pool` - Optional DLMM pool address for targeted benefits",
+        "* `associated_pool` - Optional Orbit Finance DLMM pool address for targeted benefits",
         "",
         "# Security",
         "- Verifies NFT ownership",
@@ -703,6 +865,225 @@ export type CipherNftStaking = {
       ]
     },
     {
+      "name": "unstakeCompressedNft",
+      "docs": [
+        "Unstake a compressed NFT after lock period expires",
+        "",
+        "# Arguments",
+        "* `root` - Merkle tree root hash",
+        "* `data_hash` - Hash of the NFT data",
+        "* `creator_hash` - Hash of the creator array",
+        "* `nonce` - Leaf nonce for validation",
+        "",
+        "# Security",
+        "- Verifies lock period has passed",
+        "- Verifies owner matches",
+        "- Removes Bubblegum delegate (unlocks the cNFT)",
+        "- Closes stake account (rent refund)"
+      ],
+      "discriminator": [
+        89,
+        252,
+        167,
+        93,
+        60,
+        247,
+        89,
+        196
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "docs": [
+            "The NFT owner who is unstaking"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "merkleTree",
+          "docs": [
+            "The merkle tree account"
+          ]
+        },
+        {
+          "name": "treeAuthority",
+          "docs": [
+            "The tree authority/config PDA"
+          ]
+        },
+        {
+          "name": "leafDelegate",
+          "docs": [
+            "The leaf delegate PDA that currently locks the cNFT"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  110,
+                  102,
+                  116,
+                  95,
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "stakeAccount",
+          "docs": [
+            "The stake account"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  116,
+                  97,
+                  107,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "merkleTree"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collectionConfig",
+          "docs": [
+            "The collection config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "stake_account.collection",
+                "account": "stakeAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "docs": [
+            "Global config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bubblegumProgram",
+          "docs": [
+            "Bubblegum program"
+          ]
+        },
+        {
+          "name": "logWrapper",
+          "docs": [
+            "Log wrapper for Bubblegum"
+          ]
+        },
+        {
+          "name": "compressionProgram",
+          "docs": [
+            "Compression program"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "dataHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "creatorHash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "unstakeNft",
       "docs": [
         "Unstake an NFT after lock period expires",
@@ -1045,19 +1426,6 @@ export type CipherNftStaking = {
         72,
         117
       ]
-    },
-    {
-      "name": "rewardsClaimed",
-      "discriminator": [
-        75,
-        98,
-        88,
-        18,
-        219,
-        112,
-        88,
-        121
-      ]
     }
   ],
   "errors": [
@@ -1108,38 +1476,53 @@ export type CipherNftStaking = {
     },
     {
       "code": 6009,
-      "name": "rewardsNotClaimable",
-      "msg": "Rewards not yet claimable"
-    },
-    {
-      "code": 6010,
-      "name": "noRewards",
-      "msg": "No rewards to claim"
-    },
-    {
-      "code": 6011,
       "name": "invalidMultiplier",
       "msg": "Invalid reward multiplier"
     },
     {
-      "code": 6012,
+      "code": 6010,
       "name": "stakeAlreadyExists",
       "msg": "Stake account already exists"
     },
     {
-      "code": 6013,
+      "code": 6011,
       "name": "programPaused",
       "msg": "Program is paused"
     },
     {
-      "code": 6014,
+      "code": 6012,
       "name": "invalidTokenAccount",
       "msg": "Invalid token account"
     },
     {
-      "code": 6015,
+      "code": 6013,
       "name": "metadataVerificationFailed",
       "msg": "NFT metadata verification failed"
+    },
+    {
+      "code": 6014,
+      "name": "invalidNftType",
+      "msg": "Invalid NFT type (must be 0=Traditional or 1=Compressed)"
+    },
+    {
+      "code": 6015,
+      "name": "invalidMerkleProof",
+      "msg": "Invalid merkle proof - compressed NFT ownership verification failed"
+    },
+    {
+      "code": 6016,
+      "name": "compressedNftVerificationFailed",
+      "msg": "Compressed NFT verification failed"
+    },
+    {
+      "code": 6017,
+      "name": "invalidDelegate",
+      "msg": "Delegate authority mismatch or delegation failed"
+    },
+    {
+      "code": 6018,
+      "name": "invalidMerkleTree",
+      "msg": "Merkle tree account is invalid or inaccessible"
     }
   ],
   "types": [
@@ -1313,7 +1696,7 @@ export type CipherNftStaking = {
         "This account stores program-wide settings and is controlled by the authority.",
         "Only one instance exists per program.",
         "",
-        "**Security:** Authority should be a multisig or governance program."
+        "**Security:** Authority set to Squads multisig."
       ],
       "type": {
         "kind": "struct",
@@ -1484,52 +1867,6 @@ export type CipherNftStaking = {
               "Total time staked in seconds"
             ],
             "type": "i64"
-          },
-          {
-            "name": "rewardsEarned",
-            "docs": [
-              "Total rewards earned (if any)"
-            ],
-            "type": "u64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "rewardsClaimed",
-      "docs": [
-        "Emitted when rewards are claimed"
-      ],
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "staker",
-            "docs": [
-              "The public key of the staker"
-            ],
-            "type": "pubkey"
-          },
-          {
-            "name": "nftMint",
-            "docs": [
-              "The mint address of the staked NFT"
-            ],
-            "type": "pubkey"
-          },
-          {
-            "name": "amount",
-            "docs": [
-              "Amount of rewards claimed"
-            ],
-            "type": "u64"
-          },
-          {
-            "name": "claimedAt",
-            "docs": [
-              "Unix timestamp when claimed"
-            ],
-            "type": "i64"
           }
         ]
       }
@@ -1567,7 +1904,8 @@ export type CipherNftStaking = {
           {
             "name": "nftMint",
             "docs": [
-              "The NFT mint address (used for PDA derivation)"
+              "The NFT mint address (used for PDA derivation)",
+              "For compressed NFTs: stores the merkle tree address"
             ],
             "type": "pubkey"
           },
@@ -1626,26 +1964,27 @@ export type CipherNftStaking = {
             }
           },
           {
-            "name": "rewardsClaimed",
-            "docs": [
-              "Total rewards claimed so far"
-            ],
-            "type": "u64"
-          },
-          {
-            "name": "lastClaimAt",
-            "docs": [
-              "Last time rewards were claimed"
-            ],
-            "type": "i64"
-          },
-          {
             "name": "associatedPool",
             "docs": [
-              "Optional: Associated pool address from DLMM",
+              "Optional: Associated pool address from Orbit Finance DLMM",
               "If set, this stake provides benefits for that specific pool"
             ],
             "type": "pubkey"
+          },
+          {
+            "name": "nftType",
+            "docs": [
+              "NFT type: 0 = Traditional, 1 = Compressed"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "leafIndex",
+            "docs": [
+              "For compressed NFTs: the leaf index in the merkle tree",
+              "For traditional NFTs: unused (0)"
+            ],
+            "type": "u64"
           },
           {
             "name": "padding",
@@ -1655,7 +1994,7 @@ export type CipherNftStaking = {
             "type": {
               "array": [
                 "u8",
-                128
+                135
               ]
             }
           }

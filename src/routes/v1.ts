@@ -19,7 +19,7 @@ import { calculateHolderClaimable, calculateNftClaimable } from "../services/rew
 import {
   getNftStakeStatus,
 } from "../services/nft_staking_tx_builder.js";
-import { getActiveNftStakes } from "../supabase.js";
+import { getActiveNftStakes, getNftStakingStats } from "../supabase.js";
 import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, buildPoolCreationBatchTransactions, type FeeConfig } from "../services/pool_creation.js";
 import { readPoolComplete } from "../services/pool_reader.js";
 import { upsertDexPool, supabase } from "../supabase.js";
@@ -1068,6 +1068,23 @@ export async function v1Routes(app: FastifyInstance) {
     const params = z.object({ owner: z.string().min(32) }).parse(req.params);
     const rows = getOwnerStreamflowStakes((app as any).stakeStore, params.owner);
     return { owner: params.owner, rows, ts: Date.now() };
+  });
+
+  // GET /api/v1/nft-staking/stats
+  // Get staking statistics (total staked, percentage, etc.)
+  app.get("/nft-staking/stats", async (req, reply) => {
+    const query = z.object({
+      collection: z.string().optional(),
+    }).parse(req.query);
+
+    try {
+      const stats = await getNftStakingStats(query.collection);
+      reply.header("cache-control", "public, max-age=30"); // Cache for 30 seconds
+      return { ...stats, ts: Date.now() };
+    } catch (error) {
+      reply.code(500);
+      return { error: error instanceof Error ? error.message : "Failed to fetch staking stats" };
+    }
   });
 
   // GET /api/v1/nft-staking/stakes/:owner

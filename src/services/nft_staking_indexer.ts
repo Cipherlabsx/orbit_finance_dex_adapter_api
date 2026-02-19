@@ -7,7 +7,6 @@
  * Events handled:
  * - NftStaked: Creates new stake record
  * - NftUnstaked: Marks stake as withdrawn
- * - RewardsClaimed: Updates rewards_claimed amount
  */
 
 import type { Connection, VersionedTransactionResponse } from "@solana/web3.js";
@@ -16,7 +15,7 @@ import { supabase } from "../supabase.js";
 // NFT Staking Program ID
 const NFT_STAKING_PROGRAM_ID = "7dMir6E96FwiYQQ9mdsL6AKUmgzzrERwqj7mkhthxQgV";
 
-type NftStakeEvent = NftStakedEvent | NftUnstakedEvent | RewardsClaimedEvent;
+type NftStakeEvent = NftStakedEvent | NftUnstakedEvent;
 
 type NftStakedEvent = {
   name: "NftStaked";
@@ -38,17 +37,6 @@ type NftUnstakedEvent = {
     nftMint: string;
     unstakedAt: number; // i64 unix timestamp
     totalStakedDuration: number; // i64 seconds
-    rewardsEarned: number; // u64
-  };
-};
-
-type RewardsClaimedEvent = {
-  name: "RewardsClaimed";
-  data: {
-    staker: string;
-    nftMint: string;
-    amount: number; // u64
-    claimedAt: number; // i64 unix timestamp
   };
 };
 
@@ -99,16 +87,12 @@ export function extractNftStakingEvents(tx: VersionedTransactionResponse): NftSt
       // Match discriminator to event type from IDL
       // NftStaked: [150, 229, 155, 99, 88, 181, 254, 61]
       // NftUnstaked: [253, 242, 47, 131, 231, 214, 72, 117]
-      // RewardsClaimed: [75, 98, 88, 18, 219, 112, 88, 121]
 
       if (matchesDiscriminator(discriminator, [150, 229, 155, 99, 88, 181, 254, 61])) {
         const event = parseNftStakedEvent(data);
         if (event) events.push(event);
       } else if (matchesDiscriminator(discriminator, [253, 242, 47, 131, 231, 214, 72, 117])) {
         const event = parseNftUnstakedEvent(data);
-        if (event) events.push(event);
-      } else if (matchesDiscriminator(discriminator, [75, 98, 88, 18, 219, 112, 88, 121])) {
-        const event = parseRewardsClaimedEvent(data);
         if (event) events.push(event);
       }
     } catch (err) {
@@ -166,17 +150,16 @@ function parseNftStakedEvent(data: Buffer): NftStakedEvent | null {
 /**
  * Parse NftUnstaked event from borsh-encoded data
  * struct NftUnstaked { staker: Pubkey, nft_mint: Pubkey, unstaked_at: i64,
- *   total_staked_duration: i64, rewards_earned: u64 }
+ *   total_staked_duration: i64 }
  */
 function parseNftUnstakedEvent(data: Buffer): NftUnstakedEvent | null {
   try {
-    if (data.length < 88) return null;
+    if (data.length < 80) return null;
     let offset = 0;
     const staker = data.subarray(offset, offset + 32); offset += 32;
     const nftMint = data.subarray(offset, offset + 32); offset += 32;
     const unstakedAt = data.readBigInt64LE(offset); offset += 8;
-    const totalStakedDuration = data.readBigInt64LE(offset); offset += 8;
-    const rewardsEarned = data.readBigUInt64LE(offset);
+    const totalStakedDuration = data.readBigInt64LE(offset);
 
     const { PublicKey } = require("@solana/web3.js");
     return {
@@ -186,40 +169,10 @@ function parseNftUnstakedEvent(data: Buffer): NftUnstakedEvent | null {
         nftMint: new PublicKey(nftMint).toBase58(),
         unstakedAt: Number(unstakedAt),
         totalStakedDuration: Number(totalStakedDuration),
-        rewardsEarned: Number(rewardsEarned),
       },
     };
   } catch (err) {
     console.error("Failed to parse NftUnstaked event:", err);
-    return null;
-  }
-}
-
-/**
- * Parse RewardsClaimed event from borsh-encoded data
- * struct RewardsClaimed { staker: Pubkey, nft_mint: Pubkey, amount: u64, claimed_at: i64 }
- */
-function parseRewardsClaimedEvent(data: Buffer): RewardsClaimedEvent | null {
-  try {
-    if (data.length < 80) return null;
-    let offset = 0;
-    const staker = data.subarray(offset, offset + 32); offset += 32;
-    const nftMint = data.subarray(offset, offset + 32); offset += 32;
-    const amount = data.readBigUInt64LE(offset); offset += 8;
-    const claimedAt = data.readBigInt64LE(offset);
-
-    const { PublicKey } = require("@solana/web3.js");
-    return {
-      name: "RewardsClaimed",
-      data: {
-        staker: new PublicKey(staker).toBase58(),
-        nftMint: new PublicKey(nftMint).toBase58(),
-        amount: Number(amount),
-        claimedAt: Number(claimedAt),
-      },
-    };
-  } catch (err) {
-    console.error("Failed to parse RewardsClaimed event:", err);
     return null;
   }
 }
@@ -263,14 +216,13 @@ async function handleNftUnstaked(
   event: NftUnstakedEvent,
   metadata: TransactionMetadata
 ): Promise<void> {
-  const { staker, nftMint, unstakedAt, rewardsEarned } = event.data;
+  const { staker, nftMint } = event.data;
 
   const { error } = await supabase
     .from("nft_stakes")
     .update({
       status: "withdrawn",
       withdraw_signature: metadata.signature,
-      rewards_claimed: rewardsEarned.toString(),
       updated_at: new Date().toISOString(),
     })
     .eq("nft_mint", nftMint)
@@ -283,51 +235,6 @@ async function handleNftUnstaked(
   }
 
   console.log(`[NFT_STAKING] NFT unstaked: ${nftMint} by ${staker}`);
-}
-
-/**
- * Handle RewardsClaimed event
- */
-async function handleRewardsClaimed(
-  event: RewardsClaimedEvent,
-  metadata: TransactionMetadata
-): Promise<void> {
-  const { staker, nftMint, amount, claimedAt } = event.data;
-
-  // Increment rewards_claimed and update last_claim_at
-  const { data: existing, error: fetchError } = await supabase
-    .from("nft_stakes")
-    .select("rewards_claimed")
-    .eq("nft_mint", nftMint)
-    .eq("owner_wallet", staker)
-    .eq("status", "active")
-    .single();
-
-  if (fetchError || !existing) {
-    console.error("Failed to fetch existing stake for reward claim:", fetchError);
-    return;
-  }
-
-  const previousClaimed = parseFloat(existing.rewards_claimed || "0");
-  const newTotal = previousClaimed + amount;
-
-  const { error } = await supabase
-    .from("nft_stakes")
-    .update({
-      rewards_claimed: newTotal.toString(),
-      last_claim_at: new Date(claimedAt * 1000).toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("nft_mint", nftMint)
-    .eq("owner_wallet", staker)
-    .eq("status", "active");
-
-  if (error) {
-    console.error("Failed to update rewards_claimed:", error);
-    throw error;
-  }
-
-  console.log(`[NFT_STAKING] Rewards claimed: ${amount} for ${nftMint} by ${staker}`);
 }
 
 /**
@@ -355,9 +262,6 @@ export async function processNftStakingTransaction(
             break;
           case "NftUnstaked":
             await handleNftUnstaked(event, metadata);
-            break;
-          case "RewardsClaimed":
-            await handleRewardsClaimed(event, metadata);
             break;
           default:
             console.warn("Unknown NFT staking event:", (event as any).name);

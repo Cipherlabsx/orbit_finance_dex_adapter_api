@@ -389,6 +389,12 @@
           ]
         },
         {
+          "name": "log_wrapper",
+          "docs": [
+            "SPL Noop program (log wrapper) - required by MPL Core"
+          ]
+        },
+        {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
         }
@@ -570,6 +576,12 @@
           "name": "mpl_core_program",
           "docs": [
             "MPL Core program"
+          ]
+        },
+        {
+          "name": "log_wrapper",
+          "docs": [
+            "SPL Noop program (log wrapper) - required by MPL Core"
           ]
         },
         {

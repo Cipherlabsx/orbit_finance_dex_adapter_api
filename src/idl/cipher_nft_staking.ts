@@ -395,6 +395,12 @@ export type CipherNftStaking = {
           ]
         },
         {
+          "name": "logWrapper",
+          "docs": [
+            "SPL Noop program (log wrapper) - required by MPL Core"
+          ]
+        },
+        {
           "name": "systemProgram",
           "address": "11111111111111111111111111111111"
         }
@@ -576,6 +582,12 @@ export type CipherNftStaking = {
           "name": "mplCoreProgram",
           "docs": [
             "MPL Core program"
+          ]
+        },
+        {
+          "name": "logWrapper",
+          "docs": [
+            "SPL Noop program (log wrapper) - required by MPL Core"
           ]
         },
         {

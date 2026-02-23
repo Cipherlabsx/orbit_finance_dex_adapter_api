@@ -71,6 +71,16 @@ const LIQ_EVENT_NAMES = new Set([
   "LiquidityRemovedUser",
 ]);
 
+const TXN_INDEX_FALLBACK_BASE = 1_000_000;
+
+function fallbackTxnIndexFromSignature(sig: string): number {
+  let h = 0;
+  for (let i = 0; i < sig.length; i++) {
+    h = (Math.imul(31, h) + sig.charCodeAt(i)) | 0;
+  }
+  return TXN_INDEX_FALLBACK_BASE + (Math.abs(h) % 1_000_000);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -194,7 +204,7 @@ async function getTxnIndexForSignature(connection: Connection, slot: number, sig
   const hit = TXN_INDEX_CACHE.get(slot);
 
   if (hit && now - hit.ts < TXN_INDEX_TTL_MS) {
-    return hit.map.get(sig) ?? 0;
+    return hit.map.get(sig) ?? fallbackTxnIndexFromSignature(sig);
   }
 
   const map = new Map<string, number>();
@@ -221,11 +231,11 @@ async function getTxnIndexForSignature(connection: Connection, slot: number, sig
 
     for (let i = 0; i < sigs.length; i++) map.set(sigs[i]!, i);
   } catch {
-    // ignore; fallback txnIndex=0
+    // ignore; fallback is deterministic hash-based index
   }
 
   TXN_INDEX_CACHE.set(slot, { ts: now, map });
-  return map.get(sig) ?? 0;
+  return map.get(sig) ?? fallbackTxnIndexFromSignature(sig);
 }
 
 // Post-vault reserves (correct) helpers
@@ -348,7 +358,7 @@ async function processSignature(params: {
   const slot = typeof tx.slot === "number" ? tx.slot : null;
   const blockTime = typeof tx.blockTime === "number" ? tx.blockTime : null;
 
-  const txnIndex = slot != null ? await getTxnIndexForSignature(connection, slot, signature) : 0;
+  const txnIndex = slot != null ? await getTxnIndexForSignature(connection, slot, signature) : fallbackTxnIndexFromSignature(signature);
 
   const logs = toLogs(tx);
   const decoded = decodeEventsFromLogs(logs);
@@ -455,7 +465,7 @@ async function processSignature(params: {
   let wroteGeckoSwaps = 0;
 
   // We may derive multiple swaps in one tx (multi-pool). Ensure stable eventIndex for event_type='swap'.
-  let swapEventIndex = 0;
+  let swapEventIndex = decoded.length === 0 ? 1 : decoded.length;
 
   for (const poolAddr of uniqPools) {
     const pv = await loadPoolCached(poolCache, poolAddr);

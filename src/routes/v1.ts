@@ -19,7 +19,11 @@ import { calculateHolderClaimable, calculateNftClaimable } from "../services/rew
 import {
   getNftStakeStatus,
 } from "../services/nft_staking_tx_builder.js";
-import { getActiveNftStakes, getNftStakingStats } from "../supabase.js";
+import {
+  getActiveNftStakes,
+  getNftStakingStats,
+  isDexPoolTombstonedCached,
+} from "../supabase.js";
 import { buildPoolCreationTransactions, buildPoolCreationWithLiquidityTransactions, buildPoolCreationBatchTransactions, type FeeConfig } from "../services/pool_creation.js";
 import { readPoolComplete } from "../services/pool_reader.js";
 import { upsertDexPool, supabase } from "../supabase.js";
@@ -38,14 +42,17 @@ import {
  * - Else => use discovered/indexed pools (runtime)
  */
 function getActivePools(app: FastifyInstance): string[] {
-  if (poolsFromEnv.length > 0) return poolsFromEnv;
-  return listIndexedPools(app.tradeStore);
+  const pools = poolsFromEnv.length > 0 ? poolsFromEnv : listIndexedPools(app.tradeStore);
+  return pools.filter((pool) => !isDexPoolTombstonedCached(pool));
 }
 
 /**
  * Enforce pool allowlist if POOLS is configured.
  */
 function assertPoolAllowed(pool: string) {
+  if (isDexPoolTombstonedCached(pool)) {
+    return { error: "pool_tombstoned" as const, pool };
+  }
   if (poolsFromEnv.length > 0 && !poolsFromEnv.includes(pool)) {
     return { error: "pool_not_allowed" as const, pool };
   }

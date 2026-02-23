@@ -27,6 +27,12 @@ type BinData = {
   quoteUi: number;
 };
 
+function floorToBinArrayLowerIndex(binId: number): number {
+  const q = Math.trunc(binId / 64);
+  const r = binId % 64;
+  return (r < 0 ? q - 1 : q) * 64;
+}
+
 function mustEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env: ${name}`);
@@ -123,8 +129,8 @@ async function fetchPoolBins(
   const endBin = activeBin + radius;
 
   // Group into BinArray accounts (64 bins per array)
-  const startArray = Math.trunc(startBin / 64) * 64;
-  const endArray = Math.trunc(endBin / 64) * 64;
+  const startArray = floorToBinArrayLowerIndex(startBin);
+  const endArray = floorToBinArrayLowerIndex(endBin);
 
   for (let lowerIndex = startArray; lowerIndex <= endArray; lowerIndex += 64) {
     const binArrayPda = deriveBinArrayPda(poolPubkey, lowerIndex);

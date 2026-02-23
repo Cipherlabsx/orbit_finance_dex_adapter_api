@@ -8,12 +8,126 @@ export const supabase = createClient(url, key, {
   auth: { persistSession: false },
 });
 
+type DexPoolTombstoneRow = {
+  pool: string;
+  policy?: string | null;
+};
+
+const DEX_POOL_TOMBSTONE_CACHE_TTL_MS = Math.max(
+  5_000,
+  Number(process.env.DEX_POOL_TOMBSTONE_CACHE_TTL_MS ?? 30_000) || 30_000
+);
+const DEX_POOL_TOMBSTONE_WARN_MODE =
+  (process.env.DEX_POOL_TOMBSTONE_LOG_MODE ?? "warn_once").toLowerCase() === "silent"
+    ? "silent"
+    : "warn_once";
+
+let dexPoolTombstoneCache = new Set<string>();
+let dexPoolTombstoneCacheFetchedAt = 0;
+let dexPoolTombstoneRefreshPromise: Promise<Set<string>> | null = null;
+let dexPoolTombstoneTableWarned = false;
+const dexPoolTombstoneWarnedContexts = new Set<string>();
+
 function nowIso() {
   return new Date().toISOString();
 }
 
 function nowUnix() {
   return Math.floor(Date.now() / 1000);
+}
+
+function normalizePool(pool: string | null | undefined): string | null {
+  const p = typeof pool === "string" ? pool.trim() : "";
+  return p.length >= 32 ? p : null;
+}
+
+function poolFromEventData(eventData: any): string | null {
+  if (!eventData || typeof eventData !== "object") return null;
+  const obj = eventData as Record<string, unknown>;
+  const candidates = [obj.pool, obj.pairId, obj.poolId];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim().length >= 32) return c.trim();
+  }
+  return null;
+}
+
+async function refreshDexPoolTombstoneCache(force = false): Promise<Set<string>> {
+  const now = Date.now();
+  if (!force && now - dexPoolTombstoneCacheFetchedAt < DEX_POOL_TOMBSTONE_CACHE_TTL_MS) {
+    return dexPoolTombstoneCache;
+  }
+
+  if (dexPoolTombstoneRefreshPromise) {
+    return dexPoolTombstoneRefreshPromise;
+  }
+
+  dexPoolTombstoneRefreshPromise = (async () => {
+    try {
+      const { data, error } = await supabase
+        .from("dex_indexer_pool_tombstones")
+        .select("pool,policy")
+        .returns<DexPoolTombstoneRow[]>();
+
+      if (error) {
+        // Fail open to avoid breaking environments where the tombstone table is not deployed yet.
+        if (!dexPoolTombstoneTableWarned) {
+          dexPoolTombstoneTableWarned = true;
+          console.warn(
+            `[TOMBSTONES] Failed to load dex_indexer_pool_tombstones (fail-open): ${error.message}`
+          );
+        }
+        dexPoolTombstoneCacheFetchedAt = now;
+        return dexPoolTombstoneCache;
+      }
+
+      dexPoolTombstoneCache = new Set(
+        (data ?? [])
+          .map((r) => normalizePool(r.pool))
+          .filter((p): p is string => p != null)
+      );
+      dexPoolTombstoneCacheFetchedAt = now;
+      return dexPoolTombstoneCache;
+    } finally {
+      dexPoolTombstoneRefreshPromise = null;
+    }
+  })();
+
+  return dexPoolTombstoneRefreshPromise;
+}
+
+export async function primeDexPoolTombstoneCache(): Promise<void> {
+  await refreshDexPoolTombstoneCache(true);
+}
+
+export function isDexPoolTombstonedCached(pool: string | null | undefined): boolean {
+  const p = normalizePool(pool);
+  return p ? dexPoolTombstoneCache.has(p) : false;
+}
+
+export async function isDexPoolTombstoned(pool: string | null | undefined): Promise<boolean> {
+  const p = normalizePool(pool);
+  if (!p) return false;
+  const cache = await refreshDexPoolTombstoneCache();
+  return cache.has(p);
+}
+
+export async function filterDexTombstonedPools<T extends string>(pools: readonly T[]): Promise<T[]> {
+  if (!Array.isArray(pools) || pools.length === 0) return [];
+  const cache = await refreshDexPoolTombstoneCache();
+  return pools.filter((pool) => {
+    const p = normalizePool(pool);
+    return !(p && cache.has(p));
+  });
+}
+
+export function warnDexPoolTombstoneOnce(pool: string, context: string): void {
+  if (DEX_POOL_TOMBSTONE_WARN_MODE !== "warn_once") return;
+  const p = normalizePool(pool);
+  if (!p) return;
+  const key = `${context}:${p}`;
+  if (dexPoolTombstoneWarnedContexts.has(key)) return;
+  dexPoolTombstoneWarnedContexts.add(key);
+  console.warn(`[TOMBSTONES] Skipping tombstoned pool ${p} (${context})`);
 }
 
 async function upsertWithFallback(
@@ -58,6 +172,11 @@ export async function upsertDexPool(p: {
   holdersFeeVault?: string | null;
   nftFeeVault?: string | null;
 }) {
+  if (await isDexPoolTombstoned(p.pool)) {
+    warnDexPoolTombstoneOnce(p.pool, "upsertDexPool");
+    return;
+  }
+
   const row: any = {
     pool: p.pool,
     program_id: p.programId,
@@ -98,6 +217,11 @@ export async function upsertDexPool(p: {
 }
 
 export async function writeDexTrade(trade: Trade) {
+  if (await isDexPoolTombstoned(trade.pool)) {
+    warnDexPoolTombstoneOnce(trade.pool, "writeDexTrade");
+    return;
+  }
+
   if (!trade.inMint || !trade.outMint || !trade.amountIn || !trade.amountOut) {
     return;
   }
@@ -141,7 +265,14 @@ export async function writeDexEvent(params: {
   eventIndex: number;
   eventData: any | null;
   logs: string[] | null;
+  pool?: string | null;
 }) {
+  const eventPool = normalizePool(params.pool) ?? poolFromEventData(params.eventData);
+  if (await isDexPoolTombstoned(eventPool)) {
+    warnDexPoolTombstoneOnce(eventPool!, "writeDexEvent");
+    return;
+  }
+
   const row = {
     signature: params.signature,
     slot: params.slot,
@@ -168,9 +299,14 @@ export async function updateDexPoolLiveState(params: {
   slot: number;
   signature: string;
 }) {
+  if (await isDexPoolTombstoned(params.pool)) {
+    warnDexPoolTombstoneOnce(params.pool, "updateDexPoolLiveState");
+    return;
+  }
+
   const { data: cur, error: readErr } = await supabase
     .from("dex_pools")
-    .select("last_update_slot")
+    .select("last_update_slot,last_trade_sig")
     .eq("pool", params.pool)
     .maybeSingle();
 
@@ -179,8 +315,10 @@ export async function updateDexPoolLiveState(params: {
   }
 
   const curSlot = (cur?.last_update_slot ?? null) as number | null;
-  if (curSlot != null && params.slot <= curSlot) {
-    return;
+  const curSig = (cur as any)?.last_trade_sig as string | null | undefined;
+  if (curSlot != null) {
+    if (params.slot < curSlot) return;
+    if (params.slot === curSlot && curSig === params.signature) return;
   }
 
   const update: Record<string, any> = {
@@ -214,8 +352,12 @@ export async function updateDexPoolLiquidityState(args: {
   liquidityQuote: number;
 }) {
   const { pool, slot, liquidityQuote } = args;
+  if (await isDexPoolTombstoned(pool)) {
+    warnDexPoolTombstoneOnce(pool, "updateDexPoolLiquidityState");
+    return;
+  }
 
-  const gate = `latest_liq_event_slot.is.null,latest_liq_event_slot.lt.${slot}`;
+  const gate = `latest_liq_event_slot.is.null,latest_liq_event_slot.lte.${slot}`;
 
   const patch: Record<string, any> = {
     liquidity_quote: liquidityQuote,
@@ -245,9 +387,13 @@ export async function updateDexPoolTvlLocked(params: {
   tvlLockedQuote: number;
 }): Promise<void> {
   const { pool, slot, tvlLockedQuote } = params;
+  if (await isDexPoolTombstoned(pool)) {
+    warnDexPoolTombstoneOnce(pool, "updateDexPoolTvlLocked");
+    return;
+  }
 
-  // Slot-gating: only update if slot is newer than latest_liq_event_slot
-  const gate = `latest_liq_event_slot.is.null,latest_liq_event_slot.lt.${slot}`;
+  // Allow same-slot updates too; Solana frequently has multiple relevant txs in one slot.
+  const gate = `latest_liq_event_slot.is.null,latest_liq_event_slot.lte.${slot}`;
 
   const { error } = await supabase
     .from("dex_pools")

@@ -21,6 +21,7 @@ import { createFeesStore, initFeesFromDb, startFeesAggregator } from "./services
 import { initPriceCache, cleanPriceCache } from "./services/price_oracle.js";
 import { dbListTokens } from "./services/token_registry.js";
 import { startNftStakingIndexer, markExpiredStakes } from "./services/nft_staking_indexer.js";
+import { filterDexTombstonedPools, primeDexPoolTombstoneCache } from "./supabase.js";
 
 /**
  * Logger
@@ -36,6 +37,31 @@ const app = Fastify({
   genReqId: () => reqId(),
   trustProxy: true,
 });
+
+function parsePositiveIntEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(raw)));
+}
+
+const PROGRAM_WS_WATCHDOG_CHECK_MS = parsePositiveIntEnv(
+  "PROGRAM_WS_WATCHDOG_CHECK_MS",
+  60_000,
+  5_000,
+  300_000
+);
+const PROGRAM_WS_WATCHDOG_STALL_MS = parsePositiveIntEnv(
+  "PROGRAM_WS_WATCHDOG_STALL_MS",
+  600_000,
+  30_000,
+  3_600_000
+);
+const PROGRAM_WS_WATCHDOG_MIN_RESTART_MS = parsePositiveIntEnv(
+  "PROGRAM_WS_WATCHDOG_MIN_RESTART_MS",
+  180_000,
+  10_000,
+  3_600_000
+);
 
 /**
  * Security headers (Helmet)
@@ -119,16 +145,22 @@ async function refreshPools(reason: string) {
 
   try {
     const discovered = await discoverPools();
+    const filteredDiscovered = await filterDexTombstonedPools(discovered);
 
     // Update pools list in-place
     app.poolsList.length = 0;
-    app.poolsList.push(...discovered);
+    app.poolsList.push(...filteredDiscovered);
 
     // Seed trade store for immediate visibility
     seedPoolsIntoTradeStore(app.poolsList);
 
     app.log.info(
-      { reason, count: discovered.length, programId: PROGRAM_ID.toBase58() },
+      {
+        reason,
+        count: filteredDiscovered.length,
+        filteredOut: Math.max(0, discovered.length - filteredDiscovered.length),
+        programId: PROGRAM_ID.toBase58(),
+      },
       "pools discovered"
     );
   } catch (e) {
@@ -150,6 +182,17 @@ const streamflowAgg = startStreamflowStakingAggregator({
  */
 if (app.poolsList.length === 0) {
   await refreshPools("startup");
+}
+if (app.poolsList.length > 0) {
+  const filteredStaticPools = await filterDexTombstonedPools(app.poolsList);
+  if (filteredStaticPools.length !== app.poolsList.length) {
+    app.log.warn(
+      { before: app.poolsList.length, after: filteredStaticPools.length },
+      "filtered tombstoned pools from startup pool list"
+    );
+    app.poolsList.length = 0;
+    app.poolsList.push(...filteredStaticPools);
+  }
 }
 seedPoolsIntoTradeStore(app.poolsList);
 
@@ -185,6 +228,10 @@ let feesAgg: ReturnType<typeof startFeesAggregator>;
 let programStream: ReturnType<typeof startProgramLogStream>;
 let nftStakingSubscription: number | null = null;
 let expiredStakesInterval: NodeJS.Timeout | null = null;
+let programWsWatchdogInterval: NodeJS.Timeout | null = null;
+let programWsRestarting = false;
+let programWsLastRestartAt = 0;
+let isShuttingDown = false;
 
 // Track last event time for health monitoring
 let lastEventTime = 0;
@@ -204,10 +251,12 @@ app.decorate("services", {
  * Graceful shutdown
  */
 const shutdown = async (signal: string) => {
+  isShuttingDown = true;
   app.log.info({ signal }, "shutting down");
   clearInterval(interval);
   clearInterval(priceInterval);
   if (expiredStakesInterval) clearInterval(expiredStakesInterval);
+  if (programWsWatchdogInterval) clearInterval(programWsWatchdogInterval);
 
   if (indexer) indexer.stop();
   if (volumeAgg) volumeAgg.stop();
@@ -266,6 +315,10 @@ setImmediate(async () => {
   try {
     app.log.info("starting background initialization");
 
+    await primeDexPoolTombstoneCache().catch((err) => {
+      app.log.warn({ err }, "failed to prime dex pool tombstone cache (continuing fail-open)");
+    });
+
     // Init fees cache from DB
     await initFeesFromDb(app.feesStore, app.poolsList);
     app.log.info("fees cache initialized");
@@ -299,13 +352,52 @@ setImmediate(async () => {
       debounceMs: 500,
       minIntervalMs: 1000,
     });
-    programStream = startProgramLogStream({
-      connection,
-      programId: PROGRAM_ID,
-      store: app.tradeStore,
-      wsHub: app.wsHub,
-      onEvent: () => (app as any).services.updateLastEventTime(),
-    });
+    const startProgramWs = () =>
+      startProgramLogStream({
+        connection,
+        programId: PROGRAM_ID,
+        store: app.tradeStore,
+        wsHub: app.wsHub,
+        onEvent: () => (app as any).services.updateLastEventTime(),
+      });
+
+    const restartProgramWs = async (reason: string) => {
+      if (isShuttingDown || programWsRestarting) return;
+      const now = Date.now();
+      if (now - programWsLastRestartAt < PROGRAM_WS_WATCHDOG_MIN_RESTART_MS) return;
+
+      programWsRestarting = true;
+      programWsLastRestartAt = now;
+      app.log.warn(
+        {
+          reason,
+          lastEventAgeMs: lastEventTime > 0 ? now - lastEventTime : null,
+          checkMs: PROGRAM_WS_WATCHDOG_CHECK_MS,
+          stallMs: PROGRAM_WS_WATCHDOG_STALL_MS,
+        },
+        "restarting program websocket log stream"
+      );
+
+      try {
+        if (programStream) {
+          await programStream.stop().catch((err) => {
+            app.log.warn({ err }, "failed to stop program websocket stream during restart");
+          });
+        }
+        programStream = startProgramWs();
+      } finally {
+        programWsRestarting = false;
+      }
+    };
+
+    programStream = startProgramWs();
+    programWsWatchdogInterval = setInterval(() => {
+      if (isShuttingDown || !programStream || programWsRestarting) return;
+      if (lastEventTime <= 0) return;
+      const staleMs = Date.now() - lastEventTime;
+      if (staleMs <= PROGRAM_WS_WATCHDOG_STALL_MS) return;
+      void restartProgramWs(`stalled_no_events_${staleMs}ms`);
+    }, PROGRAM_WS_WATCHDOG_CHECK_MS);
 
     // Start NFT staking indexer
     nftStakingSubscription = await startNftStakingIndexer(connection);

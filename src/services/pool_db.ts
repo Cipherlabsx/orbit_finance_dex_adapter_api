@@ -1,4 +1,10 @@
-import { supabase } from "../supabase.js";
+import {
+  supabase,
+  filterDexTombstonedPools,
+  isDexPoolTombstoned,
+  isDexPoolTombstonedCached,
+  warnDexPoolTombstoneOnce,
+} from "../supabase.js";
 
 export type DbPool = {
   pool: string;
@@ -70,14 +76,25 @@ const POOL_SELECT =
 export async function dbListPools(pools?: string[]) {
   let q = supabase.from("dex_pools").select(POOL_SELECT);
 
-  if (pools && pools.length) q = q.in("pool", pools);
+  const allowedPools = pools && pools.length ? await filterDexTombstonedPools(pools) : null;
+  if (allowedPools && allowedPools.length === 0) return [];
+  if (allowedPools && allowedPools.length) q = q.in("pool", allowedPools);
 
   const { data, error } = await q.returns<DbPool[]>();
   if (error) throw new Error(`dbListPools failed: ${error.message}`);
-  return data ?? [];
+  const rows = data ?? [];
+  if (!rows.length) return rows;
+
+  const filtered = rows.filter((r) => !isDexPoolTombstonedCached(r.pool));
+  return filtered;
 }
 
 export async function dbGetPool(pool: string) {
+  if (await isDexPoolTombstoned(pool)) {
+    warnDexPoolTombstoneOnce(pool, "dbGetPool");
+    return null;
+  }
+
   const { data, error } = await supabase
     .from("dex_pools")
     .select(POOL_SELECT)

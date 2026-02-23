@@ -13,7 +13,11 @@ import { connection, pk, PROGRAM_ID } from "../solana.js";
 import { env } from "../config.js";
 import { readPool } from "./pool_reader.js";
 import { deriveTradeFromTransaction } from "./trade_derivation.js";
-import { updateDexPoolLiveState } from "../supabase.js";
+import {
+  updateDexPoolLiveState,
+  isDexPoolTombstoned,
+  warnDexPoolTombstoneOnce,
+} from "../supabase.js";
 
 export type Trade = {
   signature: string;
@@ -226,6 +230,12 @@ function atomsToUi(atoms: string, decimals: number): number {
 async function processSignatureForPool(store: TradeStore, pool: string, sig: string) {
   const seenKey = `${sig}:${pool}`;
   if (store.seen.has(seenKey)) return;
+
+  if (await isDexPoolTombstoned(pool)) {
+    warnDexPoolTombstoneOnce(pool, "trades_indexer:processSignatureForPool");
+    store.seen.add(seenKey);
+    return;
+  }
 
   let tx: VersionedTransactionResponse | null = null;
   try {

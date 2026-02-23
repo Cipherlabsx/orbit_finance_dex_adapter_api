@@ -23,6 +23,9 @@ export type DexTrade = {
 
   amountIn: string | null; // atoms
   amountOut: string | null; // atoms
+  priceAfterQ6464?: string | null;
+  priceQuotePerBase?: number | null;
+  activeBin?: number | null;
 };
 
 /**
@@ -34,6 +37,7 @@ export type DexEvent = {
   slot: number | null;
   blockTime: number | null; // seconds
   pool?: string;
+  activeBin?: number | null;
 
   event: {
     name: string;

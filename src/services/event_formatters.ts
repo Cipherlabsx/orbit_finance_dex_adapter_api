@@ -60,6 +60,149 @@ function divToDecimalString(num: bigint, den: bigint, scale = 50): string | null
   return frac.length ? `${sign}${whole.toString()}.${frac}` : sign + whole.toString();
 }
 
+function toText(value: unknown, depth = 0): string | null {
+  if (value == null || depth > 3) return null;
+
+  if (typeof value === "string") {
+    const s = value.trim();
+    return s.length ? s : null;
+  }
+
+  if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (typeof value !== "object") return null;
+
+  const v = value as Record<string, unknown> & {
+    toBase58?: () => string;
+    toString?: (...args: any[]) => string;
+  };
+
+  if (typeof v.toBase58 === "function") {
+    try {
+      const s = v.toBase58();
+      if (typeof s === "string" && s.trim().length > 0) return s.trim();
+    } catch {}
+  }
+
+  if (typeof v.toString === "function") {
+    try {
+      const s = v.toString();
+      const t = typeof s === "string" ? s.trim() : "";
+      if (t.length > 0 && t !== "[object Object]") return t;
+    } catch {}
+  }
+
+  if ("value" in v) {
+    const nested = toText(v.value, depth + 1);
+    if (nested) return nested;
+  }
+
+  const nestedKeys = ["pubkey", "publicKey", "key", "pool", "pairId", "poolId"] as const;
+  for (const key of nestedKeys) {
+    const nested = toText(v[key], depth + 1);
+    if (nested) return nested;
+  }
+
+  return null;
+}
+
+function toAddress(value: unknown): string | null {
+  const s = toText(value);
+  return s && s.length >= 32 ? s : null;
+}
+
+function parseBigIntString(value: string): bigint | null {
+  const s = value.trim();
+  if (!s) return null;
+
+  if (/^[+-]?0x[0-9a-fA-F]+$/.test(s)) {
+    try {
+      return BigInt(s);
+    } catch {
+      return null;
+    }
+  }
+
+  if (/^[+-]?[0-9]+n$/.test(s)) {
+    try {
+      return BigInt(s.slice(0, -1));
+    } catch {
+      return null;
+    }
+  }
+
+  if (/^[+-]?[0-9]+$/.test(s)) {
+    try {
+      return BigInt(s);
+    } catch {
+      return null;
+    }
+  }
+
+  const bnHex = s.match(/^<BN:\s*([0-9a-fA-F]+)\s*>$/);
+  if (bnHex) {
+    try {
+      return BigInt(`0x${bnHex[1]}`);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function toBigIntValue(value: unknown): bigint | null {
+  if (value == null) return null;
+
+  if (typeof value === "bigint") return value;
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || !Number.isInteger(value)) return null;
+    return BigInt(value);
+  }
+
+  if (typeof value === "string") {
+    return parseBigIntString(value);
+  }
+
+  if (typeof value !== "object") return null;
+
+  const v = value as Record<string, unknown> & { toString?: (...args: any[]) => string };
+
+  if (typeof v.toString === "function") {
+    try {
+      const maybeDec = v.toString(10);
+      const parsed = typeof maybeDec === "string" ? parseBigIntString(maybeDec) : null;
+      if (parsed != null) return parsed;
+    } catch {}
+
+    try {
+      const maybe = v.toString();
+      const parsed = typeof maybe === "string" ? parseBigIntString(maybe) : null;
+      if (parsed != null) return parsed;
+    } catch {}
+  }
+
+  if ("value" in v) {
+    return toBigIntValue(v.value);
+  }
+
+  return null;
+}
+
+function toBigIntString(value: unknown, fallback = "0"): string {
+  const n = toBigIntValue(value);
+  if (n != null) return n.toString();
+  const s = toText(value);
+  return s ?? fallback;
+}
+
+function poolFromEventData(eventData: any): string | null {
+  return toAddress(eventData?.pool) ?? toAddress(eventData?.pairId) ?? toAddress(eventData?.poolId);
+}
+
 function keyToString(k: AccountKeyLike | null): string | null {
   if (!k) return null;
   if (typeof k === "string") return k;
@@ -221,13 +364,13 @@ export function formatLiquidityDeposited(args: {
 }): any | null {
   const { tx, eventData, poolView } = args;
 
-  const pool = eventData.pool as string;
-  const user = eventData.user as string;
-  const baseAmount = eventData.baseAmount;
-  const quoteAmount = eventData.quoteAmount;
-  const sharesMinted = eventData.sharesMinted;
+  const pool = poolFromEventData(eventData);
+  const user = toAddress(eventData.user);
+  const baseAmount = toBigIntValue(eventData.baseAmount);
+  const quoteAmount = toBigIntValue(eventData.quoteAmount);
+  const sharesMinted = toBigIntString(eventData.sharesMinted);
 
-  if (!pool || !baseAmount || !quoteAmount) return null;
+  if (!pool || baseAmount == null || quoteAmount == null) return null;
 
   const postRes = getPostVaultReservesAtoms(tx, poolView);
   if (!postRes) return null;
@@ -248,9 +391,9 @@ export function formatLiquidityDeposited(args: {
     maker: user ?? "11111111111111111111111111111111",
     pairId: pool,
     eventType: "liquidityDeposit",
-    asset0Amount: decimalize(BigInt(baseAmount), poolView.baseDecimals),
-    asset1Amount: decimalize(BigInt(quoteAmount), poolView.quoteDecimals),
-    shares: sharesMinted?.toString() ?? "0",
+    asset0Amount: decimalize(baseAmount, poolView.baseDecimals),
+    asset1Amount: decimalize(quoteAmount, poolView.quoteDecimals),
+    shares: sharesMinted,
     priceNative: priceNative ?? "0",
     reserves,
   };
@@ -267,13 +410,13 @@ export function formatLiquidityWithdrawnUser(args: {
 }): any | null {
   const { tx, eventData, poolView } = args;
 
-  const pool = eventData.pool as string;
-  const user = eventData.user as string;
-  const sharesBurned = eventData.sharesBurned;
-  const baseAmountOut = eventData.baseAmountOut;
-  const quoteAmountOut = eventData.quoteAmountOut;
+  const pool = poolFromEventData(eventData);
+  const user = toAddress(eventData.user);
+  const sharesBurned = toBigIntString(eventData.sharesBurned);
+  const baseAmountOut = toBigIntValue(eventData.baseAmountOut);
+  const quoteAmountOut = toBigIntValue(eventData.quoteAmountOut);
 
-  if (!pool || !baseAmountOut || !quoteAmountOut) return null;
+  if (!pool || baseAmountOut == null || quoteAmountOut == null) return null;
 
   const postRes = getPostVaultReservesAtoms(tx, poolView);
   if (!postRes) return null;
@@ -293,9 +436,9 @@ export function formatLiquidityWithdrawnUser(args: {
     maker: user ?? "11111111111111111111111111111111",
     pairId: pool,
     eventType: "liquidityWithdraw",
-    asset0Amount: decimalize(BigInt(baseAmountOut), poolView.baseDecimals),
-    asset1Amount: decimalize(BigInt(quoteAmountOut), poolView.quoteDecimals),
-    shares: sharesBurned?.toString() ?? "0",
+    asset0Amount: decimalize(baseAmountOut, poolView.baseDecimals),
+    asset1Amount: decimalize(quoteAmountOut, poolView.quoteDecimals),
+    shares: sharesBurned,
     priceNative: priceNative ?? "0",
     reserves,
   };
@@ -312,12 +455,12 @@ export function formatBinLiquidityUpdated(args: {
 }): any | null {
   const { tx, eventData, poolView } = args;
 
-  const pool = eventData.pool as string;
-  const binIndex = eventData.binIndex;
-  const deltaBase = eventData.deltaBase;
-  const deltaQuote = eventData.deltaQuote;
-  const reserveBase = eventData.reserveBase;
-  const reserveQuote = eventData.reserveQuote;
+  const pool = poolFromEventData(eventData);
+  const binIndex = toBigIntString(eventData.binIndex);
+  const deltaBase = toBigIntValue(eventData.deltaBase) ?? 0n;
+  const deltaQuote = toBigIntValue(eventData.deltaQuote) ?? 0n;
+  const reserveBase = toBigIntValue(eventData.reserveBase);
+  const reserveQuote = toBigIntValue(eventData.reserveQuote);
 
   if (!pool || reserveBase == null || reserveQuote == null) return null;
 
@@ -334,11 +477,11 @@ export function formatBinLiquidityUpdated(args: {
   return {
     pairId: pool,
     eventType: "binLiquidityUpdate",
-    binIndex: binIndex?.toString() ?? "0",
-    deltaBase: decimalize(BigInt(deltaBase ?? 0), poolView.baseDecimals),
-    deltaQuote: decimalize(BigInt(deltaQuote ?? 0), poolView.quoteDecimals),
-    reserveBase: decimalize(BigInt(reserveBase), poolView.baseDecimals),
-    reserveQuote: decimalize(BigInt(reserveQuote), poolView.quoteDecimals),
+    binIndex,
+    deltaBase: decimalize(deltaBase, poolView.baseDecimals),
+    deltaQuote: decimalize(deltaQuote, poolView.quoteDecimals),
+    reserveBase: decimalize(reserveBase, poolView.baseDecimals),
+    reserveQuote: decimalize(reserveQuote, poolView.quoteDecimals),
     reserves,
   };
 }
@@ -352,9 +495,9 @@ export function formatFeesDistributed(args: {
   eventData: any;
   poolView: PoolView;
 }): any | null {
-  const { eventData, poolView } = args;
+  const { eventData } = args;
 
-  const pool = eventData.pool as string;
+  const pool = poolFromEventData(eventData);
   const totalFee = eventData.totalFee;
   const creatorFee = eventData.creatorFee;
   const holdersFee = eventData.holdersFee;
@@ -366,11 +509,11 @@ export function formatFeesDistributed(args: {
   return {
     pairId: pool,
     eventType: "feesDistributed",
-    totalFee: totalFee?.toString() ?? "0",
-    creatorFee: creatorFee?.toString() ?? "0",
-    holdersFee: holdersFee?.toString() ?? "0",
-    nftFee: nftFee?.toString() ?? "0",
-    creatorExtraFee: creatorExtraFee?.toString() ?? "0",
+    totalFee: toBigIntString(totalFee),
+    creatorFee: toBigIntString(creatorFee),
+    holdersFee: toBigIntString(holdersFee),
+    nftFee: toBigIntString(nftFee),
+    creatorExtraFee: toBigIntString(creatorExtraFee),
   };
 }
 
@@ -384,7 +527,7 @@ export function formatFeeConfigUpdated(args: {
 }): any | null {
   const { eventData } = args;
 
-  const pool = eventData.pool as string;
+  const pool = poolFromEventData(eventData);
   const baseFeeBps = eventData.baseFeeBps;
   const creatorCutBps = eventData.creatorCutBps;
   const splitHoldersMicrobps = eventData.splitHoldersMicrobps;
@@ -396,11 +539,11 @@ export function formatFeeConfigUpdated(args: {
   return {
     pairId: pool,
     eventType: "feeConfigUpdate",
-    baseFeeBps: baseFeeBps?.toString() ?? "0",
-    creatorCutBps: creatorCutBps?.toString() ?? "0",
-    splitHoldersMicrobps: splitHoldersMicrobps?.toString() ?? "0",
-    splitNftMicrobps: splitNftMicrobps?.toString() ?? "0",
-    splitCreatorExtraMicrobps: splitCreatorExtraMicrobps?.toString() ?? "0",
+    baseFeeBps: toBigIntString(baseFeeBps),
+    creatorCutBps: toBigIntString(creatorCutBps),
+    splitHoldersMicrobps: toBigIntString(splitHoldersMicrobps),
+    splitNftMicrobps: toBigIntString(splitNftMicrobps),
+    splitCreatorExtraMicrobps: toBigIntString(splitCreatorExtraMicrobps),
   };
 }
 
@@ -414,11 +557,11 @@ export function formatPoolInitialized(args: {
 }): any | null {
   const { eventData, poolView } = args;
 
-  const pool = eventData.pool as string;
-  const admin = eventData.admin as string;
-  const creator = eventData.creator as string;
-  const baseMint = eventData.baseMint as string;
-  const quoteMint = eventData.quoteMint as string;
+  const pool = poolFromEventData(eventData);
+  const admin = toAddress(eventData.admin);
+  const creator = toAddress(eventData.creator);
+  const baseMint = toAddress(eventData.baseMint);
+  const quoteMint = toAddress(eventData.quoteMint);
   const binStepBps = eventData.binStepBps;
   const initialPriceQ6464 = eventData.initialPriceQ6464;
 
@@ -431,8 +574,8 @@ export function formatPoolInitialized(args: {
     creator: creator ?? "11111111111111111111111111111111",
     asset0: baseMint,
     asset1: quoteMint,
-    binStepBps: binStepBps?.toString() ?? "0",
-    initialPrice: initialPriceQ6464?.toString() ?? "0",
+    binStepBps: toBigIntString(binStepBps),
+    initialPrice: toBigIntString(initialPriceQ6464),
   };
 }
 
@@ -446,16 +589,16 @@ export function formatBinArrayCreated(args: {
 }): any | null {
   const { eventData } = args;
 
-  const pool = eventData.pool as string;
+  const pool = poolFromEventData(eventData);
   const lowerBinIndex = eventData.lowerBinIndex;
-  const binArray = eventData.binArray as string;
+  const binArray = toAddress(eventData.binArray) ?? toText(eventData.binArray);
 
   if (!pool || !binArray) return null;
 
   return {
     pairId: pool,
     eventType: "binArrayCreate",
-    lowerBinIndex: lowerBinIndex?.toString() ?? "0",
+    lowerBinIndex: toBigIntString(lowerBinIndex),
     binArray,
   };
 }
@@ -470,8 +613,8 @@ export function formatLiquidityBinCreated(args: {
 }): any | null {
   const { eventData } = args;
 
-  const pool = eventData.pool as string;
-  const binIndex = eventData.binIndex;
+  const pool = poolFromEventData(eventData);
+  const binIndex = toBigIntValue(eventData.binIndex);
   const lowerBoundQ6464 = eventData.lowerBoundQ6464;
   const upperBoundQ6464 = eventData.upperBoundQ6464;
   const initialTotalShares = eventData.initialTotalShares;
@@ -481,10 +624,10 @@ export function formatLiquidityBinCreated(args: {
   return {
     pairId: pool,
     eventType: "liquidityBinCreate",
-    binIndex: binIndex?.toString() ?? "0",
-    lowerBound: lowerBoundQ6464?.toString() ?? "0",
-    upperBound: upperBoundQ6464?.toString() ?? "0",
-    initialShares: initialTotalShares?.toString() ?? "0",
+    binIndex: binIndex.toString(),
+    lowerBound: toBigIntString(lowerBoundQ6464),
+    upperBound: toBigIntString(upperBoundQ6464),
+    initialShares: toBigIntString(initialTotalShares),
   };
 }
 
@@ -498,9 +641,9 @@ export function formatAdminUpdated(args: {
 }): any | null {
   const { eventData } = args;
 
-  const pool = eventData.pool as string;
-  const oldAdmin = eventData.oldAdmin as string;
-  const newAdmin = eventData.newAdmin as string;
+  const pool = poolFromEventData(eventData);
+  const oldAdmin = toAddress(eventData.oldAdmin);
+  const newAdmin = toAddress(eventData.newAdmin);
 
   if (!pool || !newAdmin) return null;
 
@@ -522,10 +665,10 @@ export function formatAuthoritiesUpdated(args: {
 }): any | null {
   const { eventData } = args;
 
-  const pool = eventData.pool as string;
-  const configAuthority = eventData.configAuthority as string;
-  const pauseGuardian = eventData.pauseGuardian as string;
-  const feeWithdrawAuthority = eventData.feeWithdrawAuthority as string;
+  const pool = poolFromEventData(eventData);
+  const configAuthority = toAddress(eventData.configAuthority);
+  const pauseGuardian = toAddress(eventData.pauseGuardian);
+  const feeWithdrawAuthority = toAddress(eventData.feeWithdrawAuthority);
 
   if (!pool) return null;
 
@@ -548,8 +691,8 @@ export function formatPauseUpdated(args: {
 }): any | null {
   const { eventData } = args;
 
-  const pool = eventData.pool as string;
-  const admin = eventData.admin as string;
+  const pool = poolFromEventData(eventData);
+  const admin = toAddress(eventData.admin);
   const paused = eventData.paused;
 
   if (!pool) return null;
@@ -558,7 +701,7 @@ export function formatPauseUpdated(args: {
     pairId: pool,
     eventType: "pauseUpdate",
     admin: admin ?? "11111111111111111111111111111111",
-    paused: paused?.toString() ?? "0",
+    paused: toBigIntString(paused),
   };
 }
 
@@ -572,9 +715,9 @@ export function formatPairRegistered(args: {
 }): any | null {
   const { eventData } = args;
 
-  const baseMint = eventData.baseMint as string;
-  const quoteMint = eventData.quoteMint as string;
-  const pool = eventData.pool as string;
+  const baseMint = toAddress(eventData.baseMint);
+  const quoteMint = toAddress(eventData.quoteMint);
+  const pool = poolFromEventData(eventData);
   const binStepBps = eventData.binStepBps;
 
   if (!pool || !baseMint || !quoteMint) return null;
@@ -584,7 +727,7 @@ export function formatPairRegistered(args: {
     eventType: "pairRegister",
     asset0: baseMint,
     asset1: quoteMint,
-    binStepBps: binStepBps?.toString() ?? "0",
+    binStepBps: toBigIntString(binStepBps),
   };
 }
 
@@ -598,9 +741,9 @@ export function formatLiquidityLocked(args: {
 }): any | null {
   const { eventData } = args;
 
-  const pool = eventData.pool as string;
-  const user = eventData.user as string;
-  const amount = eventData.amount;
+  const pool = poolFromEventData(eventData);
+  const user = toAddress(eventData.user);
+  const amount = toBigIntValue(eventData.amount);
   const lockEnd = eventData.lockEnd;
 
   if (!pool || !user || amount == null) return null;
@@ -609,8 +752,8 @@ export function formatLiquidityLocked(args: {
     pairId: pool,
     eventType: "liquidityLock",
     maker: user,
-    amount: amount?.toString() ?? "0",
-    lockEnd: lockEnd?.toString() ?? "0",
+    amount: amount.toString(),
+    lockEnd: toBigIntString(lockEnd),
   };
 }
 
@@ -625,10 +768,10 @@ export function formatLiquidityWithdrawnAdmin(args: {
 }): any | null {
   const { tx, eventData, poolView } = args;
 
-  const pool = eventData.pool as string;
-  const admin = eventData.admin as string;
-  const baseAmountOut = eventData.baseAmountOut;
-  const quoteAmountOut = eventData.quoteAmountOut;
+  const pool = poolFromEventData(eventData);
+  const admin = toAddress(eventData.admin);
+  const baseAmountOut = toBigIntValue(eventData.baseAmountOut);
+  const quoteAmountOut = toBigIntValue(eventData.quoteAmountOut);
 
   if (!pool || !admin || baseAmountOut == null || quoteAmountOut == null) return null;
 
@@ -644,8 +787,8 @@ export function formatLiquidityWithdrawnAdmin(args: {
     pairId: pool,
     eventType: "adminWithdraw",
     admin,
-    asset0Amount: decimalize(BigInt(baseAmountOut), poolView.baseDecimals),
-    asset1Amount: decimalize(BigInt(quoteAmountOut), poolView.quoteDecimals),
+    asset0Amount: decimalize(baseAmountOut, poolView.baseDecimals),
+    asset1Amount: decimalize(quoteAmountOut, poolView.quoteDecimals),
     reserves,
   };
 }
@@ -667,9 +810,12 @@ export function formatEventData(args: {
       return trade ? formatSwapExecuted({ tx, trade, poolView }) : null;
 
     case "LiquidityDeposited":
+    case "LiquidityDepositedUser":
+    case "LiquidityAddedUser":
       return formatLiquidityDeposited({ tx, eventData, poolView });
 
     case "LiquidityWithdrawnUser":
+    case "LiquidityRemovedUser":
       return formatLiquidityWithdrawnUser({ tx, eventData, poolView });
 
     case "BinLiquidityUpdated":
@@ -725,8 +871,11 @@ export function getStandardEventType(eventName: string): string {
     case "SwapExecuted":
       return "swap";
     case "LiquidityDeposited":
+    case "LiquidityDepositedUser":
+    case "LiquidityAddedUser":
       return "liquidityDeposit";
     case "LiquidityWithdrawnUser":
+    case "LiquidityRemovedUser":
       return "liquidityWithdraw";
     case "BinLiquidityUpdated":
       return "binLiquidityUpdate";

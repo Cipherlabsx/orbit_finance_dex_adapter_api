@@ -41,12 +41,54 @@ function normalizePool(pool: string | null | undefined): string | null {
   return p.length >= 32 ? p : null;
 }
 
+function poolCandidateToString(value: unknown, depth = 0): string | null {
+  if (value == null || depth > 3) return null;
+
+  if (typeof value === "string") {
+    const p = normalizePool(value);
+    return p;
+  }
+
+  if (typeof value !== "object") return null;
+
+  const v = value as Record<string, unknown> & {
+    toBase58?: () => string;
+    toString?: (...args: any[]) => string;
+  };
+
+  if (typeof v.toBase58 === "function") {
+    try {
+      const p = normalizePool(v.toBase58());
+      if (p) return p;
+    } catch {}
+  }
+
+  if (typeof v.toString === "function") {
+    try {
+      const s = v.toString();
+      if (s !== "[object Object]") {
+        const p = normalizePool(s);
+        if (p) return p;
+      }
+    } catch {}
+  }
+
+  const nestedKeys = ["pool", "pairId", "poolId", "pubkey", "publicKey", "key"] as const;
+  for (const key of nestedKeys) {
+    const nested = poolCandidateToString(v[key], depth + 1);
+    if (nested) return nested;
+  }
+
+  return null;
+}
+
 function poolFromEventData(eventData: any): string | null {
   if (!eventData || typeof eventData !== "object") return null;
   const obj = eventData as Record<string, unknown>;
   const candidates = [obj.pool, obj.pairId, obj.poolId];
   for (const c of candidates) {
-    if (typeof c === "string" && c.trim().length >= 32) return c.trim();
+    const p = poolCandidateToString(c);
+    if (p) return p;
   }
   return null;
 }

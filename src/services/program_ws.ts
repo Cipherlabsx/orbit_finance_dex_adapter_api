@@ -35,8 +35,12 @@ type AccountKeyLike = PublicKey | string | { pubkey: PublicKey };
 
 const LIQ_EVENT_NAMES = new Set([
   "LiquidityDeposited",
+  "LiquidityDepositedUser",
+  "LiquidityAddedUser",
+  "LiquidityRemovedUser",
   "LiquidityWithdrawnUser",
   "LiquidityWithdrawnAdmin",
+  "BinLiquidityUpdated",
   "LiquidityLocked",
 ]);
 
@@ -56,12 +60,52 @@ function isSwapEventName(name: string): boolean {
   return name === "SwapExecuted";
 }
 
+function addressFromUnknown(value: unknown, depth = 0): string | null {
+  if (value == null || depth > 3) return null;
+
+  if (typeof value === "string") {
+    const s = value.trim();
+    return s.length >= 32 ? s : null;
+  }
+
+  if (typeof value !== "object") return null;
+
+  const v = value as Record<string, unknown> & {
+    toBase58?: () => string;
+    toString?: (...args: any[]) => string;
+  };
+
+  if (typeof v.toBase58 === "function") {
+    try {
+      const s = v.toBase58();
+      if (typeof s === "string" && s.trim().length >= 32) return s.trim();
+    } catch {}
+  }
+
+  if (typeof v.toString === "function") {
+    try {
+      const s = v.toString();
+      const t = typeof s === "string" ? s.trim() : "";
+      if (t.length >= 32 && t !== "[object Object]") return t;
+    } catch {}
+  }
+
+  const nestedKeys = ["pool", "pairId", "poolId", "pubkey", "publicKey", "key"] as const;
+  for (const key of nestedKeys) {
+    const nested = addressFromUnknown(v[key], depth + 1);
+    if (nested) return nested;
+  }
+
+  return null;
+}
+
 function poolFromEventData(data: JsonObject | null | undefined): string | null {
   if (!data) return null;
-  if (typeof data.pool === "string") return data.pool;
-  if (typeof data.pairId === "string") return data.pairId;
-  if (typeof data.poolId === "string") return data.poolId;
-  return null;
+  return (
+    addressFromUnknown((data as any).pool) ??
+    addressFromUnknown((data as any).pairId) ??
+    addressFromUnknown((data as any).poolId)
+  );
 }
 
 function firstPoolFromDecodedEvents(decoded: AnchorEvent[]): string | null {

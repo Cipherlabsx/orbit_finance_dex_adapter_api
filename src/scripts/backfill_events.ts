@@ -65,10 +65,14 @@ type PoolView = {
 };
 
 const LIQ_EVENT_NAMES = new Set([
+  "LiquidityDeposited",
   "LiquidityWithdrawnUser",
+  "LiquidityWithdrawnAdmin",
+  "BinLiquidityUpdated",
   "LiquidityDepositedUser",
   "LiquidityAddedUser",
   "LiquidityRemovedUser",
+  "LiquidityLocked",
 ]);
 
 const TXN_INDEX_FALLBACK_BASE = 1_000_000;
@@ -134,17 +138,56 @@ function safeEventData(d: OrbitDecodedEvent["data"] | null | undefined): Record<
   return d as Record<string, unknown>;
 }
 
+function addressFromUnknown(value: unknown, depth = 0): string | null {
+  if (value == null || depth > 3) return null;
+
+  if (typeof value === "string") {
+    const s = value.trim();
+    return s.length >= 32 ? s : null;
+  }
+
+  if (typeof value !== "object") return null;
+
+  const v = value as Record<string, unknown> & {
+    toBase58?: () => string;
+    toString?: (...args: any[]) => string;
+  };
+
+  if (typeof v.toBase58 === "function") {
+    try {
+      const s = v.toBase58();
+      if (typeof s === "string" && s.trim().length >= 32) return s.trim();
+    } catch {}
+  }
+
+  if (typeof v.toString === "function") {
+    try {
+      const s = v.toString();
+      const t = typeof s === "string" ? s.trim() : "";
+      if (t.length >= 32 && t !== "[object Object]") return t;
+    } catch {}
+  }
+
+  const nestedKeys = ["pool", "pairId", "poolId", "pubkey", "publicKey", "key"] as const;
+  for (const key of nestedKeys) {
+    const nested = addressFromUnknown(v[key], depth + 1);
+    if (nested) return nested;
+  }
+
+  return null;
+}
+
 /**
  * Best-effort pool discovery from decoded event payload.
  * (Your Anchor events sometimes contain pool/poolId/pairId.)
  */
 function eventCandidatePools(evt: OrbitDecodedEvent): string[] {
-  const d = evt.data;
+  const d = evt.data as Record<string, unknown> | null | undefined;
   const out: string[] = [];
 
-  const pool = typeof (d as any)?.pool === "string" ? (d as any).pool : null;
-  const poolId = typeof (d as any)?.poolId === "string" ? (d as any).poolId : null;
-  const pairId = typeof (d as any)?.pairId === "string" ? (d as any).pairId : null;
+  const pool = addressFromUnknown(d?.pool);
+  const poolId = addressFromUnknown(d?.poolId);
+  const pairId = addressFromUnknown(d?.pairId);
 
   if (pool) out.push(pool);
   if (poolId) out.push(poolId);
@@ -420,6 +463,7 @@ async function processSignature(params: {
         eventIndex: i,
         eventData: formattedEventData,
         logs,
+        pool: evtPool,
       });
 
       // If this is a LIQ event and we have pool view, update dex_pools.liquidity_quote

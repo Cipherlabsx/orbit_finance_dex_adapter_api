@@ -953,6 +953,8 @@ export async function v1Routes(app: FastifyInstance) {
       pausedBits: r.paused_bits ?? 0,
       binStepBps: r.bin_step_bps ?? 0,
       baseFeeBps: r.base_fee_bps ?? 0,
+      liquidityQuote: num(r.liquidity_quote),
+      tvlLockedQuote: num(r.tvl_locked_quote),
 
       // Include bins if requested
       ...(bins ? { bins } : {}),

@@ -37,6 +37,27 @@ function formatUnits(amount: bigint, decimals: number): string {
   return fracStr ? `${whole}.${fracStr}` : whole.toString();
 }
 
+function toBigIntValue(v: unknown, fallback = 0n): bigint {
+  if (v == null) return fallback;
+  if (typeof v === "bigint") return v;
+  if (typeof v === "number") return Number.isFinite(v) ? BigInt(Math.trunc(v)) : fallback;
+  if (typeof v === "string") {
+    try {
+      return BigInt(v);
+    } catch {
+      return fallback;
+    }
+  }
+  if (typeof (v as { toString?: () => string }).toString === "function") {
+    try {
+      return BigInt((v as { toString: () => string }).toString());
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
 async function getSplBalanceAtoms(owner: PublicKey, mint: PublicKey): Promise<bigint> {
   const resp = await connection.getParsedTokenAccountsByOwner(owner, { mint });
 
@@ -53,11 +74,15 @@ export async function calculateHolderClaimable(
 ): Promise<{
   user: string;
   cipherBalance: string;
+  stakedAmount: string;
+  pendingRewards: string;
   claimableAtoms: string;
   claimableUi: string;
   currentIndex: string;
+  stakeEntryIndex: string;
   lastClaimedIndex: string;
   needsInit: boolean;
+  needsSync: boolean;
   decimals: number;
 }> {
   const userPk = new PublicKey(userPublicKey);
@@ -81,25 +106,41 @@ export async function calculateHolderClaimable(
     userState = await program.account.userHolderState.fetch(userPda);
   } catch {
     needsInit = true;
-    userState = { lastClaimedIndexQ128: 0n };
+    userState = {
+      stakeEntryIndexQ128: 0n,
+      pendingRewards: 0n,
+      currentStakedAmount: 0n,
+      lastSyncTime: 0,
+    };
   }
 
+  // Keep wallet balance for UI compatibility while claim math uses staked checkpoints.
   const cipherBalance = await getSplBalanceAtoms(userPk, CIPHER_MINT);
 
-  const currentIndex = BigInt(globalState.rewardIndexQ128.toString());
-  const lastIndex = BigInt(userState.lastClaimedIndexQ128.toString());
+  const currentIndex = toBigIntValue(globalState.rewardIndexQ128);
+  const stakeEntryIndex = toBigIntValue(userState.stakeEntryIndexQ128);
+  const pendingRewards = toBigIntValue(userState.pendingRewards);
+  const stakedAmount = toBigIntValue(userState.currentStakedAmount);
+  const lastSyncTime = Number(toBigIntValue(userState.lastSyncTime));
+  const needsSync = !needsInit && lastSyncTime <= 0;
 
-  const delta = currentIndex > lastIndex ? currentIndex - lastIndex : 0n;
-  const claimableAtoms = (delta * cipherBalance) / Q128;
+  const delta = currentIndex > stakeEntryIndex ? currentIndex - stakeEntryIndex : 0n;
+  const currentPeriodRewards = stakedAmount > 0n ? (delta * stakedAmount) / Q128 : 0n;
+  const claimableAtoms = pendingRewards + currentPeriodRewards;
 
   return {
     user: userPublicKey,
     cipherBalance: cipherBalance.toString(),
+    stakedAmount: stakedAmount.toString(),
+    pendingRewards: pendingRewards.toString(),
     claimableAtoms: claimableAtoms.toString(),
     claimableUi: formatUnits(claimableAtoms, REWARD_DECIMALS),
     currentIndex: currentIndex.toString(),
-    lastClaimedIndex: lastIndex.toString(),
+    stakeEntryIndex: stakeEntryIndex.toString(),
+    // Backward compatibility for existing frontend field name.
+    lastClaimedIndex: stakeEntryIndex.toString(),
     needsInit,
+    needsSync,
     decimals: REWARD_DECIMALS,
   };
 }

@@ -10,7 +10,7 @@ import { readPair } from "../services/pairs.js";
 import { readEventsBySlotRange, readLatestBlock } from "../services/events.js";
 import { verifyWsTicket, mintWsTicket } from "../services/ws_auth.js";
 import { getPoolVolumesAll } from "../services/volume_aggregator.js";
-import { getCandles } from "../services/candle_aggregator.js";
+import { getCandles, getCandlesBundle } from "../services/candle_aggregator.js";
 import { getOwnerStreamflowStakes, listStreamflowVaults } from "../services/streamflow_staking_indexer.js";
 import { dbListPools, dbGetPool } from "../services/pool_db.js";
 import { dbListTokens, dbGetToken } from "../services/token_registry.js";
@@ -417,7 +417,12 @@ export async function v1Routes(app: FastifyInstance) {
       }
 
       // Build transactions (with or without liquidity)
-      const hasLiquidity = body.baseAmount && body.quoteAmount && body.binsLeft && body.binsRight;
+      // NOTE: use explicit undefined checks so 0 values are treated as valid input.
+      const hasLiquidity =
+        body.baseAmount !== undefined &&
+        body.quoteAmount !== undefined &&
+        body.binsLeft !== undefined &&
+        body.binsRight !== undefined;
 
       const result = hasLiquidity
         ? await buildPoolCreationWithLiquidityTransactions({
@@ -1067,6 +1072,23 @@ export async function v1Routes(app: FastifyInstance) {
     return getCandles(app.candleStore, params.pool, tf as any, q.limit);
   });
 
+  // GET /api/v1/candles-bundle/:pool?limit=1500
+  // Returns latest candle slices for all supported timeframes.
+  app.get("/candles-bundle/:pool", async (req, reply) => {
+    const params = z.object({ pool: z.string().min(32) }).parse(req.params);
+    const q = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(1500).default(1500),
+      })
+      .parse((req.query ?? {}) as any);
+
+    const notAllowed = assertPoolAllowed(params.pool);
+    if (notAllowed) return notAllowed;
+
+    reply.header("cache-control", "no-store");
+    return getCandlesBundle(app.candleStore, params.pool, q.limit);
+  });
+
   // GET /api/v1/streamflow/vaults
   app.get("/streamflow/vaults", async () => {
     return { vaults: listStreamflowVaults((app as any).stakeStore), ts: Date.now() };
@@ -1132,7 +1154,14 @@ export async function v1Routes(app: FastifyInstance) {
   // Calculate claimable CIPHER holder rewards for a user
   app.post("/rewards/holder/claimable", async (req, reply) => {
     const schema = z.object({
-      user: z.string().length(44), // Base58 Solana public key
+      user: z.string().min(32).max(44).refine((s) => {
+        try {
+          new PublicKey(s);
+          return true;
+        } catch {
+          return false;
+        }
+      }, "Invalid Solana public key"),
     });
 
     try {
@@ -1172,7 +1201,14 @@ export async function v1Routes(app: FastifyInstance) {
   // Verifies NFT ownership and collection membership
   app.post("/rewards/nft/claimable", async (req, reply) => {
     const schema = z.object({
-      user: z.string().length(44), // Base58 Solana public key
+      user: z.string().min(32).max(44).refine((s) => {
+        try {
+          new PublicKey(s);
+          return true;
+        } catch {
+          return false;
+        }
+      }, "Invalid Solana public key"),
     });
 
     try {

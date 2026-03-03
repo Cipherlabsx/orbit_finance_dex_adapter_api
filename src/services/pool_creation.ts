@@ -778,10 +778,13 @@ export async function buildPoolCreationWithLiquidityTransactions(
   const quoteFloat = parseFloat(quoteAmount);
 
   if (!Number.isFinite(baseFloat) || baseFloat < 0) {
-    throw new Error(`baseAmount must be a positive finite number, got ${baseAmount}`);
+    throw new Error(`baseAmount must be a non-negative finite number, got ${baseAmount}`);
   }
   if (!Number.isFinite(quoteFloat) || quoteFloat < 0) {
-    throw new Error(`quoteAmount must be a positive finite number, got ${quoteAmount}`);
+    throw new Error(`quoteAmount must be a non-negative finite number, got ${quoteAmount}`);
+  }
+  if (baseFloat === 0 && quoteFloat === 0) {
+    throw new Error("At least one of baseAmount or quoteAmount must be greater than zero");
   }
 
   const scaledBase = baseFloat * 10 ** baseDecimals;
@@ -1649,10 +1652,13 @@ export async function buildPoolCreationBatchTransactions(
   const quoteFloat = parseFloat(quoteAmount);
 
   if (!Number.isFinite(baseFloat) || baseFloat < 0) {
-    throw new Error(`baseAmount must be a positive finite number, got ${baseAmount}`);
+    throw new Error(`baseAmount must be a non-negative finite number, got ${baseAmount}`);
   }
   if (!Number.isFinite(quoteFloat) || quoteFloat < 0) {
-    throw new Error(`quoteAmount must be a positive finite number, got ${quoteAmount}`);
+    throw new Error(`quoteAmount must be a non-negative finite number, got ${quoteAmount}`);
+  }
+  if (baseFloat === 0 && quoteFloat === 0) {
+    throw new Error("At least one of baseAmount or quoteAmount must be greater than zero");
   }
 
   const scaledBase = baseFloat * 10 ** baseDecimals;

@@ -42,6 +42,22 @@ export const PositiveDecimalStringZ = z
   );
 
 /**
+ * Non-negative decimal string (for single-sided amounts where one side can be "0")
+ * Format: "0", "123", "123.456"
+ */
+export const NonNegativeDecimalStringZ = z
+  .string()
+  .trim()
+  .regex(/^\d+(\.\d+)?$/, "Must be a valid decimal number")
+  .refine(
+    (str) => {
+      const num = parseFloat(str);
+      return !isNaN(num) && num >= 0 && isFinite(num);
+    },
+    { message: "Must be a non-negative finite number" }
+  );
+
+/**
  * Fee configuration schema
  * Enforces:
  * - baseFeeBps: 0-10000 bps (0-100%)
@@ -115,8 +131,8 @@ export const CreatePoolRequestZ = z
     }),
 
     // Liquidity parameters (optional - pool can be created without liquidity)
-    baseAmount: PositiveDecimalStringZ.optional(),
-    quoteAmount: PositiveDecimalStringZ.optional(),
+    baseAmount: NonNegativeDecimalStringZ.optional(),
+    quoteAmount: NonNegativeDecimalStringZ.optional(),
     binsLeft: z
       .number()
       .int()
@@ -145,9 +161,15 @@ export const CreatePoolRequestZ = z
     (data) => {
       // If liquidity is provided, ALL liquidity params must be provided
       const hasAnyLiquidity =
-        data.baseAmount || data.quoteAmount || data.binsLeft || data.binsRight;
+        data.baseAmount !== undefined ||
+        data.quoteAmount !== undefined ||
+        data.binsLeft !== undefined ||
+        data.binsRight !== undefined;
       const hasAllLiquidity =
-        data.baseAmount && data.quoteAmount && data.binsLeft !== undefined && data.binsRight !== undefined;
+        data.baseAmount !== undefined &&
+        data.quoteAmount !== undefined &&
+        data.binsLeft !== undefined &&
+        data.binsRight !== undefined;
 
       if (hasAnyLiquidity && !hasAllLiquidity) {
         return false;
@@ -157,6 +179,25 @@ export const CreatePoolRequestZ = z
     {
       message:
         "If adding liquidity, must provide baseAmount, quoteAmount, binsLeft, and binsRight",
+      path: ["baseAmount"],
+    }
+  )
+  .refine(
+    (data) => {
+      // If liquidity fields are present, require non-zero liquidity on at least one side.
+      const hasAllLiquidity =
+        data.baseAmount !== undefined &&
+        data.quoteAmount !== undefined &&
+        data.binsLeft !== undefined &&
+        data.binsRight !== undefined;
+      if (!hasAllLiquidity) return true;
+
+      const base = parseFloat(data.baseAmount!);
+      const quote = parseFloat(data.quoteAmount!);
+      return (Number.isFinite(base) && base > 0) || (Number.isFinite(quote) && quote > 0);
+    },
+    {
+      message: "At least one of baseAmount or quoteAmount must be greater than zero",
       path: ["baseAmount"],
     }
   );
@@ -196,40 +237,49 @@ export type DistributionConfig = z.infer<typeof DistributionConfigZ>;
  * Same as CreatePoolRequestZ but enforces liquidity parameters
  * Batched flow REQUIRES liquidity to be added during pool creation
  */
-export const CreatePoolBatchRequestZ = z
-  .object({
-    // Required addresses
-    admin: SolanaPubkeyZ,
-    creator: SolanaPubkeyZ,
-    baseMint: SolanaPubkeyZ,
-    quoteMint: SolanaPubkeyZ,
-    lpMintPublicKey: SolanaPubkeyZ,
+const CreatePoolBatchBaseZ = z.object({
+  // Required addresses
+  admin: SolanaPubkeyZ,
+  creator: SolanaPubkeyZ,
+  baseMint: SolanaPubkeyZ,
+  quoteMint: SolanaPubkeyZ,
+  lpMintPublicKey: SolanaPubkeyZ,
 
-    // Pool configuration
-    binStepBps: z.number().int().min(1).max(10000),
-    initialPrice: z.number().positive().finite(),
-    feeConfig: FeeConfigZ,
-    accountingMode: z.literal(1),
+  // Pool configuration
+  binStepBps: z.number().int().min(1).max(10000),
+  initialPrice: z.number().positive().finite(),
+  feeConfig: FeeConfigZ,
+  accountingMode: z.literal(1),
 
-    // Liquidity parameters (REQUIRED for batched flow)
-    baseAmount: PositiveDecimalStringZ,
-    quoteAmount: PositiveDecimalStringZ,
-    binsLeft: z.number().int().min(0).max(200),
-    binsRight: z.number().int().min(0).max(200),
+  // Liquidity parameters (REQUIRED for batched flow)
+  baseAmount: NonNegativeDecimalStringZ,
+  quoteAmount: NonNegativeDecimalStringZ,
+  binsLeft: z.number().int().min(0).max(200),
+  binsRight: z.number().int().min(0).max(200),
 
-    // Distribution strategy (OPTIONAL - defaults to uniform)
-    distribution: DistributionConfigZ.optional(),
+  // Distribution strategy (OPTIONAL - defaults to uniform)
+  distribution: DistributionConfigZ.optional(),
 
-    // Token decimals
-    baseDecimals: z.number().int().min(0).max(18),
-    quoteDecimals: z.number().int().min(0).max(18),
+  // Token decimals
+  baseDecimals: z.number().int().min(0).max(18),
+  quoteDecimals: z.number().int().min(0).max(18),
 
-    // Optional settings
-    settings: PoolCreationSettingsZ,
-  })
+  // Optional settings
+  settings: PoolCreationSettingsZ,
+});
+
+export const CreatePoolBatchRequestZ = CreatePoolBatchBaseZ
   .refine((data) => data.baseMint !== data.quoteMint, {
     message: "Base and quote tokens must be different",
     path: ["quoteMint"],
+  })
+  .refine((data) => {
+    const base = parseFloat(data.baseAmount);
+    const quote = parseFloat(data.quoteAmount);
+    return (Number.isFinite(base) && base > 0) || (Number.isFinite(quote) && quote > 0);
+  }, {
+    message: "At least one of baseAmount or quoteAmount must be greater than zero",
+    path: ["baseAmount"],
   });
 
 export type CreatePoolBatchRequest = z.infer<typeof CreatePoolBatchRequestZ>;

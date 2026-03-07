@@ -499,6 +499,8 @@ export function formatFeesDistributed(args: {
 
   const pool = poolFromEventData(eventData);
   const totalFee = eventData.totalFee;
+  const protocolFee = eventData.protocolFee ?? eventData.protocol_fee;
+  const protocolStakerFee = eventData.protocolStakerFee ?? eventData.protocol_staker_fee;
   const creatorFee = eventData.creatorFee;
   const holdersFee = eventData.holdersFee;
   const nftFee = eventData.nftFee;
@@ -510,6 +512,8 @@ export function formatFeesDistributed(args: {
     pairId: pool,
     eventType: "feesDistributed",
     totalFee: toBigIntString(totalFee),
+    protocolFee: toBigIntString(protocolFee),
+    protocolStakerFee: toBigIntString(protocolStakerFee),
     creatorFee: toBigIntString(creatorFee),
     holdersFee: toBigIntString(holdersFee),
     nftFee: toBigIntString(nftFee),

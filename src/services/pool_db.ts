@@ -20,6 +20,7 @@ export type DbPool = {
   creator_fee_vault: string | null;
   holders_fee_vault: string | null;
   nft_fee_vault: string | null;
+  protocol_fee_vault?: string | null;
   base_fee_bps: number | null;
   bin_step_bps: number | null;
   paused_bits: number | null;
@@ -33,14 +34,14 @@ export type DbPool = {
   creator_fee_ui: string | number | null;
   holders_fee_ui: string | number | null;
   nft_fee_ui: string | number | null;
+  protocol_fee_ui?: string | number | null;
   fees_updated_at: string | null;
   updated_at: string | null;
   bins: string | object | null; // JSONB column storing bin liquidity data
   bins_updated_at: string | null;
 };
 
-const POOL_SELECT =
-  [
+const POOL_SELECT_BASE = [
     "pool",
     "program_id",
     "base_mint",
@@ -71,16 +72,34 @@ const POOL_SELECT =
     "updated_at",
     "bins",
     "bins_updated_at",
-  ].join(",");
+  ];
+
+const POOL_SELECT = [...POOL_SELECT_BASE, "protocol_fee_vault", "protocol_fee_ui"].join(",");
+const POOL_SELECT_LEGACY = POOL_SELECT_BASE.join(",");
+
+function isMissingProtocolColumnsError(error: any): boolean {
+  const msg = String(error?.message ?? "").toLowerCase();
+  return msg.includes("protocol_fee_vault") || msg.includes("protocol_fee_ui");
+}
+
+function listPoolsQuery(selectClause: string, allowedPools: string[] | null) {
+  let q = supabase.from("dex_pools").select(selectClause);
+  if (allowedPools && allowedPools.length) q = q.in("pool", allowedPools);
+  return q;
+}
 
 export async function dbListPools(pools?: string[]) {
-  let q = supabase.from("dex_pools").select(POOL_SELECT);
-
   const allowedPools = pools && pools.length ? await filterDexTombstonedPools(pools) : null;
   if (allowedPools && allowedPools.length === 0) return [];
-  if (allowedPools && allowedPools.length) q = q.in("pool", allowedPools);
 
-  const { data, error } = await q.returns<DbPool[]>();
+  let { data, error } = await listPoolsQuery(POOL_SELECT, allowedPools).returns<DbPool[]>();
+  if (error && isMissingProtocolColumnsError(error)) {
+    // Backward-compatible fallback if protocol columns are not yet migrated.
+    const legacy = await listPoolsQuery(POOL_SELECT_LEGACY, allowedPools).returns<DbPool[]>();
+    data = legacy.data;
+    error = legacy.error;
+  }
+
   if (error) throw new Error(`dbListPools failed: ${error.message}`);
   const rows = data ?? [];
   if (!rows.length) return rows;
@@ -95,11 +114,21 @@ export async function dbGetPool(pool: string) {
     return null;
   }
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from("dex_pools")
     .select(POOL_SELECT)
     .eq("pool", pool)
     .maybeSingle();
+
+  if (error && isMissingProtocolColumnsError(error)) {
+    const legacy = await supabase
+      .from("dex_pools")
+      .select(POOL_SELECT_LEGACY)
+      .eq("pool", pool)
+      .maybeSingle();
+    data = legacy.data;
+    error = legacy.error;
+  }
 
   if (error) throw new Error(`dbGetPool failed: ${error.message}`);
   return (data ?? null) as DbPool | null;

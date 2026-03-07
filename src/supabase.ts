@@ -213,6 +213,7 @@ export async function upsertDexPool(p: {
   creatorFeeVault?: string | null;
   holdersFeeVault?: string | null;
   nftFeeVault?: string | null;
+  protocolFeeVault?: string | null;
 }) {
   if (await isDexPoolTombstoned(p.pool)) {
     warnDexPoolTombstoneOnce(p.pool, "upsertDexPool");
@@ -254,8 +255,21 @@ export async function upsertDexPool(p: {
   if (p.creatorFeeVault !== undefined) row.creator_fee_vault = p.creatorFeeVault;
   if (p.holdersFeeVault !== undefined) row.holders_fee_vault = p.holdersFeeVault;
   if (p.nftFeeVault !== undefined) row.nft_fee_vault = p.nftFeeVault;
+  if (p.protocolFeeVault !== undefined) row.protocol_fee_vault = p.protocolFeeVault;
 
-  await upsertWithFallback("dex_pools", row, ["pool"]);
+  try {
+    await upsertWithFallback("dex_pools", row, ["pool"]);
+  } catch (error: any) {
+    const msg = String(error?.message ?? "").toLowerCase();
+    if (msg.includes("protocol_fee_vault")) {
+      // Backward-compatible fallback if protocol_fee_vault column is not migrated yet.
+      const legacyRow = { ...row };
+      delete legacyRow.protocol_fee_vault;
+      await upsertWithFallback("dex_pools", legacyRow, ["pool"]);
+      return;
+    }
+    throw error;
+  }
 }
 
 export async function writeDexTrade(trade: Trade) {

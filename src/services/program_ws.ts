@@ -483,6 +483,7 @@ export function startProgramLogStream(params: {
               quoteMint: poolView.quoteMint,
               baseDecimals: poolView.baseDecimals,
               quoteDecimals: poolView.quoteDecimals,
+              protocolFeeVault: poolView.protocolFeeVault,
             });
 
             const trade = deriveTradeFromTransaction(tx, {

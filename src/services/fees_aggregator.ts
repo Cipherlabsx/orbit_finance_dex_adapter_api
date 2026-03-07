@@ -5,6 +5,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { AccountLayout, MintLayout } from "@solana/spl-token";
 
 type FeeUi = {
+  protocol: number;
   creator: number;
   holders: number;
   nft: number;
@@ -18,7 +19,10 @@ type FeeStoreState = {
   // pool -> scheduled refresh timer
   timers: Map<string, NodeJS.Timeout>;
   // cached fee vault addrs (from DB)
-  vaults: Map<string, { creator: string | null; holders: string | null; nft: string | null }>;
+  vaults: Map<
+    string,
+    { protocol: string | null; creator: string | null; holders: string | null; nft: string | null }
+  >;
 };
 
 export type FeesStore = FeeStoreState;
@@ -152,12 +156,14 @@ export async function initFeesFromDb(feesStore: FeesStore, pools: string[]) {
 
   for (const r of rows) {
     feesStore.vaults.set(r.pool, {
+      protocol: r.protocol_fee_vault ?? null,
       creator: r.creator_fee_vault ?? null,
       holders: r.holders_fee_vault ?? null,
       nft: r.nft_fee_vault ?? null,
     });
 
     feesStore.byPool.set(r.pool, {
+      protocol: num(r.protocol_fee_ui, 0),
       creator: num(r.creator_fee_ui, 0),
       holders: num(r.holders_fee_ui, 0),
       nft: num(r.nft_fee_ui, 0),
@@ -170,6 +176,7 @@ async function writeFeesToDb(pool: string, fees: FeeUi) {
   if (!supa) return;
 
   const patch = {
+    protocol_fee_ui: fees.protocol,
     creator_fee_ui: fees.creator,
     holders_fee_ui: fees.holders,
     nft_fee_ui: fees.nft,
@@ -177,7 +184,19 @@ async function writeFeesToDb(pool: string, fees: FeeUi) {
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await supa.from("dex_pools").update(patch).eq("pool", pool);
+  let { error } = await supa.from("dex_pools").update(patch).eq("pool", pool);
+  if (error && String(error.message ?? "").toLowerCase().includes("protocol_fee_ui")) {
+    // Backward-compatible fallback for deployments without protocol_fee_ui column.
+    const legacyPatch = {
+      creator_fee_ui: fees.creator,
+      holders_fee_ui: fees.holders,
+      nft_fee_ui: fees.nft,
+      fees_updated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const retry = await supa.from("dex_pools").update(legacyPatch).eq("pool", pool);
+    error = retry.error;
+  }
   if (error) {
     // eslint-disable-next-line no-console
     console.error("[fees_aggregator] db update failed:", pool, error.message ?? error);
@@ -191,12 +210,13 @@ export async function refreshFeesForPool(feesStore: FeesStore, pool: string) {
   const v = feesStore.vaults.get(pool);
   if (!v) return;
 
-  const vaultList = [v.creator, v.holders, v.nft].filter(Boolean) as string[];
+  const vaultList = [v.protocol, v.creator, v.holders, v.nft].filter(Boolean) as string[];
   if (vaultList.length === 0) return;
 
   const uiByVault = await readFeeVaultUiBalances(vaultList);
 
   const next: FeeUi = {
+    protocol: v.protocol ? uiByVault.get(v.protocol) ?? 0 : 0,
     creator: v.creator ? uiByVault.get(v.creator) ?? 0 : 0,
     holders: v.holders ? uiByVault.get(v.holders) ?? 0 : 0,
     nft: v.nft ? uiByVault.get(v.nft) ?? 0 : 0,

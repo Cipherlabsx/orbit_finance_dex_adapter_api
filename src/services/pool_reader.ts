@@ -20,6 +20,7 @@ export type PoolView = {
   creatorFeeVault: string | null;
   holdersFeeVault: string | null;
   nftFeeVault: string | null;
+  protocolFeeVault: string | null;
   activeBin: number;
   initialBin: number;
   binReserveBaseAtoms: string | null;
@@ -229,6 +230,7 @@ export async function readPool(pool: string): Promise<PoolView> {
   const creatorFeeVaultPk = pick<any>(raw, ["creatorFeeVault", "creator_fee_vault"]);
   const holdersFeeVaultPk = pick<any>(raw, ["holdersFeeVault", "holders_fee_vault"]);
   const nftFeeVaultPk = pick<any>(raw, ["nftFeeVault", "nft_fee_vault"]);
+  const protocolFeeVaultPk = pick<any>(raw, ["protocolFeeVault", "protocol_fee_vault"]);
 
   // q64.64 price (atoms-price: quoteAtoms/baseAtoms)
   const priceVal = pick<any>(raw, ["price_q64_64"]);
@@ -296,6 +298,10 @@ export async function readPool(pool: string): Promise<PoolView> {
       holdersFeeVaultPk != null ? asPk(holdersFeeVaultPk, "holders_fee_vault").toBase58() : null,
     nftFeeVault:
       nftFeeVaultPk != null ? asPk(nftFeeVaultPk, "nft_fee_vault").toBase58() : null,
+    protocolFeeVault:
+      protocolFeeVaultPk != null
+        ? asPk(protocolFeeVaultPk, "protocol_fee_vault").toBase58()
+        : null,
     activeBin,
     initialBin,
     binReserveBaseAtoms,

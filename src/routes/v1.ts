@@ -641,6 +641,7 @@ export async function v1Routes(app: FastifyInstance) {
         creatorFeeVault: poolData.creatorFeeVault,
         holdersFeeVault: poolData.holdersFeeVault,
         nftFeeVault: poolData.nftFeeVault,
+        protocolFeeVault: poolData.protocolFeeVault,
       });
 
       reply.header("cache-control", "no-store");
@@ -861,9 +862,13 @@ export async function v1Routes(app: FastifyInstance) {
       creatorFeeVault: r.creator_fee_vault ?? null,
       holdersFeeVault: r.holders_fee_vault ?? null,
       nftFeeVault: r.nft_fee_vault ?? null,
+      protocolFeeVault: r.protocol_fee_vault ?? null,
       creatorFeeUi: num(r.creator_fee_ui),
       holdersFeeUi: num(r.holders_fee_ui),
       nftFeeUi: num(r.nft_fee_ui),
+      protocolFeeUi: num(r.protocol_fee_ui),
+      // Staker-side rewards are credited into holders_fee_vault by program design.
+      stakerSideFeeUi: num(r.holders_fee_ui),
       feesUpdatedAt: r.fees_updated_at ?? null,
 
       activeBin: r.active_bin ?? 0,
@@ -945,11 +950,15 @@ export async function v1Routes(app: FastifyInstance) {
       creatorFeeVault: r.creator_fee_vault ?? null,
       holdersFeeVault: r.holders_fee_vault ?? null,
       nftFeeVault: r.nft_fee_vault ?? null,
+      protocolFeeVault: r.protocol_fee_vault ?? null,
 
       feesCollected: {
+        protocol: num(r.protocol_fee_ui),
         creator: num(r.creator_fee_ui),
         holders: num(r.holders_fee_ui),
         nft: num(r.nft_fee_ui),
+        // Program routes protocol staker share into holders fee vault/index.
+        stakerSide: num(r.holders_fee_ui),
       },
 
       feesUpdatedAt: r.fees_updated_at ?? null,

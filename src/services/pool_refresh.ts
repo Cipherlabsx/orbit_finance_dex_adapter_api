@@ -9,6 +9,9 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const PROGRAM_ID = new PublicKey("Fn3fA3fjsmpULNL7E9U79jKTe1KHxPtQeWdURCbJXCnM");
+const BINS_PER_ARRAY = 64;
+const COMPACT_BIN_LEN = 80; // 5 * u128
+const BIN_ARRAY_DATA_LEN = 8 + 32 + BINS_PER_ARRAY * COMPACT_BIN_LEN + 4 + 1 + 11; // discriminator + BinArray
 
 type BinData = {
   binId: number;
@@ -48,7 +51,7 @@ export async function refreshPoolBins(
       return { success: false, bins: null, error: "Pool not found in database" };
     }
 
-    if (!pool.active_bin) {
+    if (pool.active_bin == null) {
       return { success: false, bins: null, error: "Pool has no active_bin set" };
     }
 
@@ -108,34 +111,37 @@ async function fetchPoolBinsFromChain(
   const endBin = activeBin + radius;
 
   // Group into BinArray accounts (64 bins per array)
-  const startArray = Math.trunc(startBin / 64) * 64;
-  const endArray = Math.trunc(endBin / 64) * 64;
+  const startArray = lowerBinIndexFrom(startBin);
+  const endArray = lowerBinIndexFrom(endBin);
 
-  for (let lowerIndex = startArray; lowerIndex <= endArray; lowerIndex += 64) {
+  for (let lowerIndex = startArray; lowerIndex <= endArray; lowerIndex += BINS_PER_ARRAY) {
     const binArrayPda = deriveBinArrayPda(poolPubkey, lowerIndex);
 
     try {
       const accountInfo = await connection.getAccountInfo(binArrayPda);
 
-      if (!accountInfo || accountInfo.data.length < 44) {
+      if (!accountInfo || accountInfo.data.length < BIN_ARRAY_DATA_LEN) {
         continue; // BinArray doesn't exist or invalid
       }
 
-      // Parse BinArray: discriminator(8) + pool(32) + lower_bin_index(4) + bins(64*24)
+      // Parse BinArray: discriminator(8) + pool(32) + bins(64*80) + lower_bin_index(4) + bump(1) + reserved(11)
       const data = accountInfo.data;
-      const binsData = data.subarray(44);
+      const lowerIndexOffset = 8 + 32 + BINS_PER_ARRAY * COMPACT_BIN_LEN;
+      const lowerIndexInAccount = readI32LE(data, lowerIndexOffset);
+      if (lowerIndexInAccount !== lowerIndex) {
+        continue;
+      }
 
-      // Parse each bin (24 bytes minimum)
-      for (let binOffset = 0; binOffset < 64; binOffset++) {
-        const binStart = binOffset * 24;
-        if (binStart + 24 > binsData.length) break;
+      for (let binOffset = 0; binOffset < BINS_PER_ARRAY; binOffset++) {
+        const binStart = 8 + 32 + binOffset * COMPACT_BIN_LEN;
 
-        const binData = binsData.subarray(binStart, binStart + 24);
-
-        // Read u64 little-endian fields
-        const totalShares = readU64LE(binData, 0);
-        const baseReserves = readU64LE(binData, 8);
-        const quoteReserves = readU64LE(binData, 16);
+        // CompactBin layout:
+        // reserve_base:u128 (0..16)
+        // reserve_quote:u128 (16..32)
+        // total_shares:u128 (32..48)
+        const baseReserves = readU128LE(data, binStart + 0);
+        const quoteReserves = readU128LE(data, binStart + 16);
+        const totalShares = readU128LE(data, binStart + 32);
 
         // Skip bins with no liquidity
         if (totalShares === 0n) continue;
@@ -180,13 +186,24 @@ function deriveBinArrayPda(pool: PublicKey, lowerIndex: number): PublicKey {
   return pda;
 }
 
+function lowerBinIndexFrom(binId: number): number {
+  return Math.floor(binId / BINS_PER_ARRAY) * BINS_PER_ARRAY;
+}
+
 function calculatePriceFromBin(binId: number, binStepBps: number): number {
   const step = binStepBps / 10000;
   const base = 1 + step;
   return Math.pow(base, binId);
 }
 
-function readU64LE(buffer: Uint8Array, offset: number): bigint {
+function readI32LE(buffer: Uint8Array, offset: number): number {
   const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  return view.getBigUint64(offset, true); // true = little endian
+  return view.getInt32(offset, true);
+}
+
+function readU128LE(buffer: Uint8Array, offset: number): bigint {
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  const lo = view.getBigUint64(offset, true);
+  const hi = view.getBigUint64(offset + 8, true);
+  return (hi << 64n) + lo;
 }

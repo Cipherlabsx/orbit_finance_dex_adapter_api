@@ -11,6 +11,11 @@
 
 import { z } from "zod";
 
+const MAX_BASE_FEE_BPS = 1000; // Must match on-chain cap (10%)
+const ALLOWED_BIN_STEPS = [
+  1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400,
+] as const;
+
 /**
  * Solana public key validation
  * Base58 encoded, 32-44 characters (most commonly 44)
@@ -60,14 +65,14 @@ export const NonNegativeDecimalStringZ = z
 /**
  * Fee configuration schema
  * Enforces:
- * - baseFeeBps: 0-10000 bps (0-100%)
+ * - baseFeeBps: 0-1000 bps (0-10%)
  * - creatorCutBps: 0-baseFeeBps
  * - Splits sum to exactly 100,000 microbps (100%)
  */
 export const FeeConfigZ = z
   .object({
-    baseFeeBps: z.number().int().min(0).max(10000),
-    creatorCutBps: z.number().int().min(0).max(10000),
+    baseFeeBps: z.number().int().min(0).max(MAX_BASE_FEE_BPS),
+    creatorCutBps: z.number().int().min(0).max(MAX_BASE_FEE_BPS),
     splitHoldersMicrobps: z.number().int().min(0).max(100000),
     splitNftMicrobps: z.number().int().min(0).max(100000),
     splitCreatorExtraMicrobps: z.number().int().min(0).max(100000),
@@ -120,7 +125,7 @@ export const CreatePoolRequestZ = z
       .number()
       .int()
       .min(1, "Bin step must be at least 1 bps")
-      .max(10000, "Bin step cannot exceed 10,000 bps"),
+      .max(400, "Bin step cannot exceed 400 bps"),
     initialPrice: z
       .number()
       .positive("Initial price must be positive")
@@ -153,6 +158,13 @@ export const CreatePoolRequestZ = z
     // Optional settings
     settings: PoolCreationSettingsZ,
   })
+  .refine(
+    (data) => (ALLOWED_BIN_STEPS as readonly number[]).includes(data.binStepBps),
+    {
+      message: `binStepBps must be one of: ${ALLOWED_BIN_STEPS.join(", ")}`,
+      path: ["binStepBps"],
+    }
+  )
   .refine((data) => data.baseMint !== data.quoteMint, {
     message: "Base and quote tokens must be different",
     path: ["quoteMint"],
@@ -246,7 +258,7 @@ const CreatePoolBatchBaseZ = z.object({
   lpMintPublicKey: SolanaPubkeyZ,
 
   // Pool configuration
-  binStepBps: z.number().int().min(1).max(10000),
+  binStepBps: z.number().int().min(1).max(400),
   initialPrice: z.number().positive().finite(),
   feeConfig: FeeConfigZ,
   accountingMode: z.literal(1),
@@ -269,6 +281,13 @@ const CreatePoolBatchBaseZ = z.object({
 });
 
 export const CreatePoolBatchRequestZ = CreatePoolBatchBaseZ
+  .refine(
+    (data) => (ALLOWED_BIN_STEPS as readonly number[]).includes(data.binStepBps),
+    {
+      message: `binStepBps must be one of: ${ALLOWED_BIN_STEPS.join(", ")}`,
+      path: ["binStepBps"],
+    }
+  )
   .refine((data) => data.baseMint !== data.quoteMint, {
     message: "Base and quote tokens must be different",
     path: ["quoteMint"],

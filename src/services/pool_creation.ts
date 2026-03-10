@@ -48,7 +48,7 @@ export type PriorityLevel = "fast" | "turbo" | "ultra";
  * Must match IDL FeeConfig struct
  */
 export type FeeConfig = {
-  baseFeeBps: number;           // Base fee in basis points (0-10000)
+  baseFeeBps: number;           // Base fee in basis points (0-1000)
   creatorCutBps: number;        // Creator's cut of fees in bps (0-baseFeeBps)
   splitHoldersMicrobps: number; // Split for LP holders in microbps
   splitNftMicrobps: number;     // Split for NFT holders in microbps
@@ -118,6 +118,7 @@ export type SerializedInstruction = {
  * Allowed bin step values (in basis points)
  */
 const ALLOWED_BIN_STEPS = [1, 2, 4, 5, 8, 10, 15, 16, 20, 25, 30, 50, 75, 80, 100, 125, 150, 160, 200, 250, 300, 400];
+const MAX_BASE_FEE_BPS = 1000;
 
 /**
  * Convert signed bin index (i32) to canonical u64 encoding FOR INSTRUCTION DATA ONLY.
@@ -146,9 +147,9 @@ function binIndexToU64(binIndexSigned: number): bigint {
  * Validates fee configuration
  */
 function validateFeeConfig(config: FeeConfig): void {
-  // Base fee must be 0-10000 bps (0-100%)
-  if (config.baseFeeBps < 0 || config.baseFeeBps > 10000) {
-    throw new Error(`baseFeeBps must be 0-10000, got ${config.baseFeeBps}`);
+  // Base fee must be 0-1000 bps (0-10%)
+  if (config.baseFeeBps < 0 || config.baseFeeBps > MAX_BASE_FEE_BPS) {
+    throw new Error(`baseFeeBps must be 0-${MAX_BASE_FEE_BPS}, got ${config.baseFeeBps}`);
   }
 
   // Creator cut must be <= base fee
@@ -1465,8 +1466,8 @@ function priceToActiveBin(priceQ64_64: bigint, binStepBps: number): number {
   if (priceQ64_64 <= 0n) {
     throw new Error(`Invalid price: ${priceQ64_64} (must be > 0)`);
   }
-  if (binStepBps <= 0 || binStepBps > 10000) {
-    throw new Error(`Invalid binStepBps: ${binStepBps} (must be 1-10000)`);
+  if (!ALLOWED_BIN_STEPS.includes(binStepBps)) {
+    throw new Error(`Invalid binStepBps: ${binStepBps} (allowed: ${ALLOWED_BIN_STEPS.join(", ")})`);
   }
 
   // Convert Q64.64 to float carefully

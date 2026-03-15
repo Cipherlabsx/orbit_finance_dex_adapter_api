@@ -35,6 +35,8 @@ export type DbPool = {
   holders_fee_ui: string | number | null;
   nft_fee_ui: string | number | null;
   protocol_fee_ui?: string | number | null;
+  reserve_base_ui?: number | null;
+  reserve_quote_ui?: number | null;
   fees_updated_at: string | null;
   updated_at: string | null;
   bins: string | object | null; // JSONB column storing bin liquidity data
@@ -77,9 +79,10 @@ const POOL_SELECT_BASE = [
 const POOL_SELECT = [...POOL_SELECT_BASE, "protocol_fee_vault", "protocol_fee_ui", "reserve_base_ui", "reserve_quote_ui"].join(",");
 const POOL_SELECT_LEGACY = POOL_SELECT_BASE.join(",");
 
-function isMissingProtocolColumnsError(error: any): boolean {
+function isMissingColumnsError(error: any): boolean {
   const msg = String(error?.message ?? "").toLowerCase();
-  return msg.includes("protocol_fee_vault") || msg.includes("protocol_fee_ui");
+  return msg.includes("protocol_fee_vault") || msg.includes("protocol_fee_ui")
+    || msg.includes("reserve_base_ui") || msg.includes("reserve_quote_ui");
 }
 
 function listPoolsQuery(selectClause: string, allowedPools: string[] | null) {
@@ -93,7 +96,7 @@ export async function dbListPools(pools?: string[]) {
   if (allowedPools && allowedPools.length === 0) return [];
 
   let { data, error } = await listPoolsQuery(POOL_SELECT, allowedPools).returns<DbPool[]>();
-  if (error && isMissingProtocolColumnsError(error)) {
+  if (error && isMissingColumnsError(error)) {
     // Backward-compatible fallback if protocol columns are not yet migrated.
     const legacy = await listPoolsQuery(POOL_SELECT_LEGACY, allowedPools).returns<DbPool[]>();
     data = legacy.data;
@@ -120,7 +123,7 @@ export async function dbGetPool(pool: string) {
     .eq("pool", pool)
     .maybeSingle();
 
-  if (error && isMissingProtocolColumnsError(error)) {
+  if (error && isMissingColumnsError(error)) {
     const legacy = await supabase
       .from("dex_pools")
       .select(POOL_SELECT_LEGACY)

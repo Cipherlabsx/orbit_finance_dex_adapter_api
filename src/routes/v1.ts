@@ -638,6 +638,8 @@ export async function v1Routes(app: FastifyInstance) {
         lpSupplyRaw: poolData.lpSupplyRaw,
         liquidityQuote: poolData.liquidityQuote,
         tvlLockedQuote: poolData.tvlLockedQuote,
+        reserveBaseUi: poolData.reserveBaseUi,
+        reserveQuoteUi: poolData.reserveQuoteUi,
         creatorFeeVault: poolData.creatorFeeVault,
         holdersFeeVault: poolData.holdersFeeVault,
         nftFeeVault: poolData.nftFeeVault,
@@ -845,43 +847,73 @@ export async function v1Routes(app: FastifyInstance) {
     // pull DB rows
     const rows = await dbListPools(pools);
 
-    const out = rows.map((r: any) => ({
-      id: r.pool,
-      programId: r.program_id ?? "",
+    // Batch-fetch quote mint USD prices from token registry for USD conversions
+    const quoteMints = [...new Set(rows.map((r: any) => r.quote_mint).filter(Boolean))];
+    const quotePriceMap: Record<string, number> = {};
+    if (quoteMints.length > 0) {
+      const tokenRows = await Promise.all(quoteMints.map((m: string) => dbGetToken(m)));
+      for (const t of tokenRows) {
+        if (t && t.priceUsd != null && Number.isFinite(t.priceUsd)) {
+          quotePriceMap[t.mint] = t.priceUsd;
+        }
+      }
+    }
 
-      baseMint: r.base_mint ?? "",
-      quoteMint: r.quote_mint ?? "",
+    const out = rows.map((r: any) => {
+      const priceNumber = r.last_price_quote_per_base == null ? null : num(r.last_price_quote_per_base);
+      const liquidityQuote = num(r.liquidity_quote);
+      const tvlLockedQuote = num(r.tvl_locked_quote);
+      const quoteUsd = quotePriceMap[r.quote_mint] ?? null;
 
-      // safe defaults
-      priceQ6464: "0",
-      priceNumber: r.last_price_quote_per_base == null ? null : num(r.last_price_quote_per_base),
+      // USD conversions (null if quote price unavailable)
+      const priceUsd = priceNumber != null && quoteUsd != null ? priceNumber * quoteUsd : null;
+      const liquidityUsd = quoteUsd != null ? liquidityQuote * quoteUsd : null;
+      const tvlLockedUsd = quoteUsd != null ? tvlLockedQuote * quoteUsd : null;
 
-      baseVault: r.base_vault ?? "",
-      quoteVault: r.quote_vault ?? "",
+      return {
+        id: r.pool,
+        programId: r.program_id ?? "",
 
-      creatorFeeVault: r.creator_fee_vault ?? null,
-      holdersFeeVault: r.holders_fee_vault ?? null,
-      nftFeeVault: r.nft_fee_vault ?? null,
-      protocolFeeVault: r.protocol_fee_vault ?? null,
-      creatorFeeUi: num(r.creator_fee_ui),
-      holdersFeeUi: num(r.holders_fee_ui),
-      nftFeeUi: num(r.nft_fee_ui),
-      protocolFeeUi: num(r.protocol_fee_ui),
-      // Staker-side rewards are credited into holders_fee_vault by program design.
-      stakerSideFeeUi: num(r.holders_fee_ui),
-      feesUpdatedAt: r.fees_updated_at ?? null,
+        baseMint: r.base_mint ?? "",
+        quoteMint: r.quote_mint ?? "",
 
-      activeBin: r.active_bin ?? 0,
-      initialBin: r.initial_bin ?? 0,
+        // safe defaults
+        priceQ6464: "0",
+        priceNumber,
+        priceUsd,
 
-      admin: r.admin ?? "",
-      pausedBits: r.paused_bits ?? 0,
-      binStepBps: r.bin_step_bps ?? 0,
-      baseFeeBps: r.base_fee_bps ?? 0,
+        baseVault: r.base_vault ?? "",
+        quoteVault: r.quote_vault ?? "",
 
-      liquidityQuote: num(r.liquidity_quote),
-      tvlLockedQuote: num(r.tvl_locked_quote),
-    }));
+        creatorFeeVault: r.creator_fee_vault ?? null,
+        holdersFeeVault: r.holders_fee_vault ?? null,
+        nftFeeVault: r.nft_fee_vault ?? null,
+        protocolFeeVault: r.protocol_fee_vault ?? null,
+        creatorFeeUi: num(r.creator_fee_ui),
+        holdersFeeUi: num(r.holders_fee_ui),
+        nftFeeUi: num(r.nft_fee_ui),
+        protocolFeeUi: num(r.protocol_fee_ui),
+        // Staker-side rewards are credited into holders_fee_vault by program design.
+        stakerSideFeeUi: num(r.holders_fee_ui),
+        feesUpdatedAt: r.fees_updated_at ?? null,
+
+        activeBin: r.active_bin ?? 0,
+        initialBin: r.initial_bin ?? 0,
+
+        admin: r.admin ?? "",
+        pausedBits: r.paused_bits ?? 0,
+        binStepBps: r.bin_step_bps ?? 0,
+        baseFeeBps: r.base_fee_bps ?? 0,
+
+        liquidityQuote,
+        liquidityUsd,
+        tvlLockedQuote,
+        tvlLockedUsd,
+
+        reserveBaseUi: num(r.reserve_base_ui),
+        reserveQuoteUi: num(r.reserve_quote_ui),
+      };
+    });
 
     return { pools: out };
   });
@@ -933,6 +965,21 @@ export async function v1Routes(app: FastifyInstance) {
       }
     }
 
+    // USD conversion for single pool
+    const priceNumber = r.last_price_quote_per_base == null ? null : num(r.last_price_quote_per_base);
+    const liquidityQuote = num(r.liquidity_quote);
+    const tvlLockedQuote = num(r.tvl_locked_quote);
+    let quoteUsd: number | null = null;
+    if (r.quote_mint) {
+      const quoteToken = await dbGetToken(r.quote_mint);
+      if (quoteToken?.priceUsd != null && Number.isFinite(quoteToken.priceUsd)) {
+        quoteUsd = quoteToken.priceUsd;
+      }
+    }
+    const priceUsd = priceNumber != null && quoteUsd != null ? priceNumber * quoteUsd : null;
+    const liquidityUsd = quoteUsd != null ? liquidityQuote * quoteUsd : null;
+    const tvlLockedUsd = quoteUsd != null ? tvlLockedQuote * quoteUsd : null;
+
     return {
       id: r.pool,
       programId: r.program_id ?? "",
@@ -940,9 +987,8 @@ export async function v1Routes(app: FastifyInstance) {
       baseMint: r.base_mint ?? "",
       quoteMint: r.quote_mint ?? "",
 
-      priceNumber: r.last_price_quote_per_base == null
-        ? null
-        : num(r.last_price_quote_per_base),
+      priceNumber,
+      priceUsd,
 
       baseVault: r.base_vault ?? "",
       quoteVault: r.quote_vault ?? "",
@@ -967,8 +1013,13 @@ export async function v1Routes(app: FastifyInstance) {
       pausedBits: r.paused_bits ?? 0,
       binStepBps: r.bin_step_bps ?? 0,
       baseFeeBps: r.base_fee_bps ?? 0,
-      liquidityQuote: num(r.liquidity_quote),
-      tvlLockedQuote: num(r.tvl_locked_quote),
+      liquidityQuote,
+      liquidityUsd,
+      tvlLockedQuote,
+      tvlLockedUsd,
+
+      reserveBaseUi: num(r.reserve_base_ui),
+      reserveQuoteUi: num(r.reserve_quote_ui),
 
       // Include bins if requested
       ...(bins ? { bins } : {}),

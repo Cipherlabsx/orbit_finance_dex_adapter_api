@@ -38,6 +38,8 @@ export type PoolCompleteView = PoolView & {
   escrowLpRaw: string;
   liquidityQuote: number;
   tvlLockedQuote: number;
+  reserveBaseUi: number;
+  reserveQuoteUi: number;
 };
 
 export type BinPoint = {
@@ -395,6 +397,8 @@ export async function readPoolComplete(pool: string): Promise<PoolCompleteView> 
     escrowLpRaw: escrowLpRaw.toString(),
     liquidityQuote,
     tvlLockedQuote,
+    reserveBaseUi: baseVaultUi,
+    reserveQuoteUi: quoteVaultUi,
   };
 }
 

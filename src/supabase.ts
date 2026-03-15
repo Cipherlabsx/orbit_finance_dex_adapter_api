@@ -210,6 +210,8 @@ export async function upsertDexPool(p: {
   lpSupplyRaw?: string | null;
   liquidityQuote?: number | null;
   tvlLockedQuote?: number | null;
+  reserveBaseUi?: number | null;
+  reserveQuoteUi?: number | null;
   creatorFeeVault?: string | null;
   holdersFeeVault?: string | null;
   nftFeeVault?: string | null;
@@ -251,6 +253,12 @@ export async function upsertDexPool(p: {
   }
   if (p.tvlLockedQuote !== undefined && p.tvlLockedQuote !== null && Number.isFinite(p.tvlLockedQuote)) {
     row.tvl_locked_quote = p.tvlLockedQuote;
+  }
+  if (p.reserveBaseUi !== undefined && p.reserveBaseUi !== null && Number.isFinite(p.reserveBaseUi)) {
+    row.reserve_base_ui = p.reserveBaseUi;
+  }
+  if (p.reserveQuoteUi !== undefined && p.reserveQuoteUi !== null && Number.isFinite(p.reserveQuoteUi)) {
+    row.reserve_quote_ui = p.reserveQuoteUi;
   }
   if (p.creatorFeeVault !== undefined) row.creator_fee_vault = p.creatorFeeVault;
   if (p.holdersFeeVault !== undefined) row.holders_fee_vault = p.holdersFeeVault;

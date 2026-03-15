@@ -74,7 +74,7 @@ const POOL_SELECT_BASE = [
     "bins_updated_at",
   ];
 
-const POOL_SELECT = [...POOL_SELECT_BASE, "protocol_fee_vault", "protocol_fee_ui"].join(",");
+const POOL_SELECT = [...POOL_SELECT_BASE, "protocol_fee_vault", "protocol_fee_ui", "reserve_base_ui", "reserve_quote_ui"].join(",");
 const POOL_SELECT_LEGACY = POOL_SELECT_BASE.join(",");
 
 function isMissingProtocolColumnsError(error: any): boolean {

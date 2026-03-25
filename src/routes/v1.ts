@@ -1087,6 +1087,58 @@ export async function v1Routes(app: FastifyInstance) {
     return await readEventsBySlotRange(app.tradeStore, q.fromBlock, q.toBlock, eventTypes);
   });
 
+  // ---------------------------------------------------------------------------
+  // GeckoTerminal On-Chain DEX Adapter v2 endpoints
+  // GET /api/v1/coingecko/events/latest-block
+  // GET /api/v1/coingecko/events?fromBlock=:number&toBlock=:number
+  // GET /api/v1/coingecko/asset?id=:mintAddress
+  // GET /api/v1/coingecko/pair?id=:poolAddress
+  // ---------------------------------------------------------------------------
+
+  app.get("/coingecko/events/latest-block", async () => {
+    return await readLatestBlock();
+  });
+
+  app.get("/coingecko/events", async (req, reply) => {
+    const result = z
+      .object({
+        fromBlock: z.coerce.number().int().min(0),
+        toBlock: z.coerce.number().int().min(0),
+      })
+      .safeParse((req.query ?? {}) as any);
+
+    if (!result.success) {
+      reply.code(400);
+      return { error: "missing_params", message: "Query parameters 'fromBlock' and 'toBlock' are required" };
+    }
+
+    if (result.data.toBlock < result.data.fromBlock) return { events: [] };
+
+    return await readEventsBySlotRange(app.tradeStore, result.data.fromBlock, result.data.toBlock, [
+      "swap",
+      "liquidityDeposit",
+      "liquidityWithdraw",
+    ]);
+  });
+
+  app.get("/coingecko/asset", async (req, reply) => {
+    const result = z.object({ id: z.string().min(32) }).safeParse((req.query ?? {}) as any);
+    if (!result.success) {
+      reply.code(400);
+      return { error: "missing_param", message: "Query parameter 'id' (mint address) is required" };
+    }
+    return await readAsset(result.data.id);
+  });
+
+  app.get("/coingecko/pair", async (req, reply) => {
+    const result = z.object({ id: z.string().min(32) }).safeParse((req.query ?? {}) as any);
+    if (!result.success) {
+      reply.code(400);
+      return { error: "missing_param", message: "Query parameter 'id' (pool address) is required" };
+    }
+    return await readPair(result.data.id);
+  });
+
   // GET /api/v1/volumes?tf=24h&pools=pool1,pool2
   app.get("/volumes", async (req) => {
     const q = z

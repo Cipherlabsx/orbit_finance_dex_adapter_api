@@ -38,16 +38,14 @@ export type StandardsSwapEvent = {
 
 export type StandardsLiquidityEvent = {
   block: StandardsBlock;
-  eventType: "liquidityDeposit" | "liquidityWithdraw";
+  eventType: "join" | "exit";
   txnId: string;
   txnIndex: number;
   eventIndex: number;
   maker: string;
   pairId: string;
-  asset0Amount: string;
-  asset1Amount: string;
-  shares: string;
-  priceNative: string;
+  amount0: string;
+  amount1: string;
   reserves: {
     asset0: string;
     asset1: string;
@@ -195,16 +193,14 @@ function rowToLiquidityEvent(row: DexEventRow): StandardsLiquidityEvent | null {
 
   return {
     block: { blockNumber: row.slot, blockTimestamp: row.block_time },
-    eventType: row.event_type as "liquidityDeposit" | "liquidityWithdraw",
+    eventType: (row.event_type === "liquidityDeposit" ? "join" : "exit") as "join" | "exit",
     txnId: row.signature,
     txnIndex: row.txn_index ?? 0,
     eventIndex: row.event_index ?? 0,
     maker: d.maker ?? "11111111111111111111111111111111",
     pairId: d.pairId,
-    asset0Amount: d.asset0Amount,
-    asset1Amount: d.asset1Amount,
-    shares: d.shares ?? "0",
-    priceNative: d.priceNative ?? "0",
+    amount0: d.asset0Amount,
+    amount1: d.asset1Amount,
     reserves,
   };
 }

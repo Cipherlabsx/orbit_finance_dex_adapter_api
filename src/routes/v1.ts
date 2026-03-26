@@ -16,6 +16,7 @@ import { dbListPools, dbGetPool } from "../services/pool_db.js";
 import { dbListTokens, dbGetToken } from "../services/token_registry.js";
 import { getTokenPrice, getRelativePrice, getBatchPrices } from "../services/price_oracle.js";
 import { calculateHolderClaimable, calculateNftClaimable } from "../services/rewards.js";
+import { calculatePositionFees } from "../services/lp_fees.js";
 import {
   getNftStakeStatus,
 } from "../services/nft_staking_tx_builder.js";
@@ -1364,6 +1365,32 @@ export async function v1Routes(app: FastifyInstance) {
       console.error("NFT claimable calculation error:", error);
       reply.code(500);
       return { error: "calculation_failed", message: errorMessage };
+    }
+  });
+
+  // GET /api/v1/positions/:owner/fees
+  // Returns accrued LP fees for all positions owned by :owner, aggregated per position.
+  // Useful for pre-populating the claim_lp_fees button — no transaction needed.
+  // Cache TTL: 10s (fees change per swap; exact real-time not critical).
+  app.get("/positions/:owner/fees", async (req, reply) => {
+    const { owner } = req.params as { owner: string };
+
+    let ownerPk: import("@solana/web3.js").PublicKey;
+    try {
+      ownerPk = new PublicKey(owner);
+    } catch {
+      reply.code(400);
+      return { error: "invalid_owner", message: "owner must be a valid Solana public key" };
+    }
+
+    try {
+      const result = await calculatePositionFees(ownerPk.toBase58());
+      reply.header("cache-control", "public, max-age=10, s-maxage=10");
+      return { owner: ownerPk.toBase58(), positions: result, ts: Date.now() };
+    } catch (error) {
+      console.error("Position fees error:", error);
+      reply.code(500);
+      return { error: "calculation_failed", message: error instanceof Error ? error.message : String(error) };
     }
   });
 

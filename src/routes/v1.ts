@@ -1089,17 +1089,17 @@ export async function v1Routes(app: FastifyInstance) {
 
   // ---------------------------------------------------------------------------
   // GeckoTerminal On-Chain DEX Adapter v2 endpoints
-  // GET /api/v1/coingecko/events/latest-block
-  // GET /api/v1/coingecko/events?fromBlock=:number&toBlock=:number
-  // GET /api/v1/coingecko/asset?id=:mintAddress
-  // GET /api/v1/coingecko/pair?id=:poolAddress
+  // GeckoTerminal On-Chain DEX Adapter v2
+  // Supported base URLs:
+  //   Base = .../api/v1/coingecko        → /latest-block, /events, /asset, /pair
+  //   Base = .../api/v1/coingecko/events → /latest-block, /events, /asset, /pair (aliases)
   // ---------------------------------------------------------------------------
 
-  app.get("/coingecko/events/latest-block", async () => {
+  async function geckoLatestBlock() {
     return await readLatestBlock();
-  });
+  }
 
-  app.get("/coingecko/events", async (req, reply) => {
+  async function geckoEvents(req: any, reply: any) {
     const result = z
       .object({
         fromBlock: z.coerce.number().int().min(0),
@@ -1119,25 +1119,37 @@ export async function v1Routes(app: FastifyInstance) {
       "liquidityDeposit",
       "liquidityWithdraw",
     ]);
-  });
+  }
 
-  app.get("/coingecko/asset", async (req, reply) => {
+  async function geckoAsset(req: any, reply: any) {
     const result = z.object({ id: z.string().min(32) }).safeParse((req.query ?? {}) as any);
     if (!result.success) {
       reply.code(400);
       return { error: "missing_param", message: "Query parameter 'id' (mint address) is required" };
     }
     return await readAsset(result.data.id);
-  });
+  }
 
-  app.get("/coingecko/pair", async (req, reply) => {
+  async function geckoPair(req: any, reply: any) {
     const result = z.object({ id: z.string().min(32) }).safeParse((req.query ?? {}) as any);
     if (!result.success) {
       reply.code(400);
       return { error: "missing_param", message: "Query parameter 'id' (pool address) is required" };
     }
     return await readPair(result.data.id);
-  });
+  }
+
+  // Base = .../api/v1/coingecko
+  app.get("/coingecko/latest-block", geckoLatestBlock);
+  app.get("/coingecko/events", geckoEvents);
+  app.get("/coingecko/asset", geckoAsset);
+  app.get("/coingecko/pair", geckoPair);
+
+  // Base = .../api/v1/coingecko/events (GeckoTerminal configured base)
+  app.get("/coingecko/events/latest-block", geckoLatestBlock);
+  app.get("/coingecko/events/events", geckoEvents);
+  app.get("/coingecko/events/asset", geckoAsset);
+  app.get("/coingecko/events/pair", geckoPair);
 
   // GET /api/v1/volumes?tf=24h&pools=pool1,pool2
   app.get("/volumes", async (req) => {
